@@ -63,15 +63,31 @@ python3 -m pytest tests/ -q                  # offline unit tests
 `verify_sources.py` is read-only, identifies itself with an honest User-Agent, and makes a small
 number of requests.
 
+### Uncertainties resolved (Addendum A)
+
+Both high-impact uncertainties were verified against **official sources only**:
+
+- **U1 — scheduled workflows on a free private repo: VERIFIED, no restriction.** GitHub's 60-day
+  auto-disable is documented as applying to *public* repositories only. Free plan grants 2,000
+  minutes/month for private repos; we need ~210. One actionable constraint: the workflow file
+  must be on the **default branch** to fire at all.
+- **U3 — Upstox v3 after 30 Sep 2026: VERIFIED, no official expiry exists.** The complete Upstox
+  announcement history carries no sunset, deprecation or fee for v3 — and v3 was actively
+  extended on 4 Sep 2026. The third-party expiry claim is unsubstantiated.
+
+The check also surfaced the **Analytics Token**: a free, **read-only, 1-year** Upstox credential
+that needs no static IP for historical data and *cannot place orders*. It removes the daily-login
+problem and makes the "never trades" guarantee a property of the credential rather than of our
+code. And a real operational finding: **NSE archives throttle intermittently with HTTP 403**, so
+retry with backoff is mandatory — now implemented in `verify_sources.py`.
+
 ## Next phase
 
 **Phase 1 — data foundation.** Database schema, source adapters, integrity checks, and the daily
-scheduled job. Two items come first:
+scheduled job. Highest-priority item:
 
-1. **Resolve unresolved question U1** (do `schedule` events work on free private repos?) — a
-   10-minute test that could change the compute host.
-2. **Start point-in-time universe archiving.** This is time-sensitive: every day it is not
-   running is a day of survivorship-bias control data that cannot be recovered later.
+**Start point-in-time universe archiving.** This is time-sensitive: every day it is not running
+is a day of survivorship-bias control data that cannot be recovered later.
 
 Phase 1 does not begin until Phase 0 is reviewed and approved. See report section 14 for the
 full phase plan.

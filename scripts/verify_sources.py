@@ -16,6 +16,7 @@ import csv
 import io
 import json
 import sys
+import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
@@ -25,6 +26,9 @@ from dataclasses import dataclass, field
 # work but is the wrong posture toward a data provider.
 USER_AGENT = "indian-stock-research/0.1 (Phase 0 source verification)"
 TIMEOUT = 30
+RETRIES = 3
+BACKOFF_BASE = 2.0  # seconds; doubles each attempt
+RETRYABLE = {403, 429, 500, 502, 503, 504, 0}
 
 NSE_ARCHIVES = "https://nsearchives.nseindia.com"
 UPSTOX_HIST = "https://api.upstox.com/v3/historical-candle"
@@ -51,16 +55,32 @@ class Report:
         return sum(1 for r in self.results if not r.ok)
 
 
-def fetch(url: str) -> tuple[int, bytes]:
-    """GET a URL. Returns (status, body); status 0 on transport error."""
+def fetch(url: str, retries: int = RETRIES) -> tuple[int, bytes]:
+    """GET a URL with backoff on transient throttling.
+
+    Returns (status, body); status 0 on transport error.
+
+    NSE archives were observed returning HTTP 403 intermittently during Phase 0:
+    the same URL that failed on one run succeeded on the next, and the failure
+    moved between paths. It is per-client throttling, not a block, and it
+    recovers. Any production loader must retry rather than treat a single 403
+    as a source outage.
+    """
     req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
-    try:
-        with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
-            return resp.status, resp.read()
-    except urllib.error.HTTPError as exc:
-        return exc.code, b""
-    except Exception:
-        return 0, b""
+    status, body = 0, b""
+    for attempt in range(retries + 1):
+        try:
+            with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
+                return resp.status, resp.read()
+        except urllib.error.HTTPError as exc:
+            status = exc.code
+            if status not in RETRYABLE:
+                return status, b""
+        except Exception:
+            status = 0
+        if attempt < retries:
+            time.sleep(BACKOFF_BASE * (2**attempt))
+    return status, body
 
 
 # --- pure helpers, unit-tested offline -------------------------------------

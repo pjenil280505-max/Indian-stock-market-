@@ -742,3 +742,181 @@ python3 -m pytest tests/ -q                # offline logic tests
 `scripts/verify_sources.py` re-runs the connectivity, adjustment-semantics, history-depth and
 universe-count checks in §0.4 and prints a pass/fail table. It is read-only, uses an honest
 User-Agent, and makes a small number of requests.
+
+---
+
+# Addendum A — Resolution of U1 and U3 (2026-09-22)
+
+Both high-impact uncertainties were re-investigated against **primary sources only**.
+Third-party claims were the origin of both doubts and were excluded from the resolution.
+
+## A.1 — U1: Scheduled workflows on a free private repository
+
+**Status: VERIFIED — no restriction exists.**
+
+**Official sources:**
+- [Events that trigger workflows — GitHub Docs](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows)
+- [About billing for GitHub Actions — GitHub Docs](https://docs.github.com/en/billing/managing-billing-for-your-products/managing-billing-for-github-actions/about-billing-for-github-actions)
+- [GitHub Actions limits — GitHub Docs](https://docs.github.com/en/actions/reference/limits)
+
+**Findings:**
+
+GitHub's `schedule` documentation lists exactly these limitations, and **none is conditioned on
+plan or repository visibility**:
+
+> "The shortest interval you can run scheduled workflows is once every 5 minutes."
+
+> "The `schedule` event can be delayed during periods of high loads of GitHub Actions workflow
+> runs. High load times include the start of every hour."
+
+> "This event will only trigger a workflow run if the workflow file exists on the default branch."
+
+The 60-day auto-disable is **explicitly scoped to public repositories**:
+
+> "In a **public** repository, scheduled workflows are automatically disabled when no repository
+> activity has occurred in 60 days."
+
+Billing documentation confirms Free-plan private repositories receive runner minutes:
+
+> "For **private repositories**, each GitHub account receives a quota of free minutes, artifact
+> storage, and cache storage for use with GitHub-hosted runners, depending on the account's plan."
+
+| Plan | Minutes/month | Artifact storage |
+|---|---|---|
+| **GitHub Free** | **2,000** | 500 MB |
+| GitHub Pro | 3,000 | 1 GB |
+
+The limits page differentiates plans only by **quantity** (Free: 20 concurrent jobs; 6-hour job
+limit; 35-day workflow-run limit), never by trigger type.
+
+**Exact limitations that apply to us:**
+
+| Limitation | Our exposure |
+|---|---|
+| 5-minute minimum interval | None — daily job |
+| Delays at high load, worst at the top of the hour | Schedule at **18:30 IST (13:00 UTC)**, not on the hour; job must be idempotent and catch up missed days |
+| Workflow file must be on the **default branch** | **Actionable:** the daily workflow will not fire from `claude/...`. It must be merged to `main` before it runs |
+| 6-hour job limit | Full backfill is ~3.5 h — fits, but chunk it anyway |
+| 2,000 min/month | Using ~210 min/month — **9.5× headroom** |
+| 20 concurrent jobs (Free) | None — single job |
+
+**Correction to the Phase 0 report:** §1.3 listed the 60-day auto-disable as applying to this
+private repository ("treat as applying here"). **That was over-cautious.** GitHub's documentation
+scopes it to public repositories only. The keepalive workflow proposed in §1.3 is **not required**.
+The Telegram watchdog (§4.4) is still worth keeping, for scheduler skips rather than auto-disable.
+
+**₹0 architecture: VALID.** Compute recommendation stands unchanged, with more headroom than
+originally credited.
+
+## A.2 — U3: Upstox v3 availability after 30 September 2026
+
+**Status: VERIFIED — the expiry claim is unsupported by any official source.**
+
+**Official sources:**
+- [Upstox Developer API — Announcements](https://upstox.com/developer/api-documentation/announcements/) (complete list, Mar 2024 – Sep 2026)
+- [Upstox Developer API — Analytics Token](https://upstox.com/developer/api-documentation/analytics-token/)
+- [Upstox Developer API — API Overview](https://upstox.com/developer/api-documentation/api-overview/)
+
+**Findings:**
+
+The full official announcement history contains **no announcement of a 30 September 2026 expiry**,
+no sunset notice for v3, and no introduction of an API subscription charge. Upstox does announce
+deprecations prominently when they occur — the list includes the V2 WebSocket discontinuation
+(22 Aug 2025), the V2 API deprecations (30 Jun 2025), the CSV instruments-file deprecation, and
+the removal of zero-brokerage API trades (31 Aug 2024). A pricing change of the claimed
+significance would appear here. It does not.
+
+The evidence points the opposite way — **v3 is under active development**:
+
+| Date | Announcement |
+|---|---|
+| **4 Sep 2026** (18 days before this report) | **Full Market Quotes V3 API** and updated **Market Data Feed V3 WebSocket** |
+| 11 Aug 2026 | IPO Application APIs (Beta) |
+| 1 Aug 2026 | Closing Auction Session support |
+| 6 Jun 2026 | Analytics Token portfolio support |
+
+**Conclusion:** the "free till 30 September 2026" claim came from a single third-party summary and
+is **not corroborated by Upstox**. I found no official statement that the API is free *or* that it
+expires — Upstox simply does not publish an API subscription fee. Treat the third-party claim as
+**unsubstantiated**, not as a confirmed reprieve.
+
+### A.2.1 — Material discovery: the Analytics Token
+
+The official documentation revealed a facility that **resolves the project's single largest
+architectural constraint**. Announced 20 March 2026:
+
+| Property | Official text |
+|---|---|
+| Validity | "an expiry period of **1 year** from the date of generation" |
+| Access | "**read-only** access to a defined set of Upstox APIs"; "only **GET APIs** are supported" |
+| Cost | "The Analytics Token is **free to use and does not carry any cost**" |
+| Trading | "does **not** support trading operations. Actions such as placing or modifying orders are **not permitted**" |
+| Historical Data + static IP | **Not required.** Historical Data, Market Quote, Option Chain, Fundamentals, News and WebSocket "can be called from **any server, laptop or serverless function**" |
+| Static IP required for | User, Payments, Orders, GTT Orders, Portfolio, Mutual Fund, Trade P&L — **none of which this project uses** |
+
+**Why this matters more than the U3 question itself:**
+
+Phase 0 §0.2 Correction 2 identified SEBI-mandated daily token expiry as the reason broker APIs
+could not be the backbone of an unattended system, because unattended use would require storing a
+trading password and TOTP seed in the cloud. **The Analytics Token eliminates that trade-off
+entirely:**
+
+1. **1-year validity** — no daily login, no TOTP seed, no stored password. One annual rotation.
+2. **Read-only, GET-only, orders structurally impossible** — the project's "never place trades"
+   safety constraint (§7) becomes enforced by the credential itself, not merely by our code. This
+   is a stronger guarantee than the CI check proposed in §7, and it should be kept *in addition*
+   to it.
+3. **No static IP for Historical Data** — the docs explicitly bless "serverless function", which is
+   exactly the GitHub Actions model. Static-IP requirements would otherwise have been fatal to the
+   ₹0 compute design, since Actions runners have no fixed IP.
+4. **Free.**
+
+This also downgrades **U4** (the undocumented no-token endpoint): there is now a *documented,
+supported, unattended-friendly* path, so the architecture need not touch the undocumented one at
+all. The recommendation in §2.6 Risk A stands and is now easy to follow.
+
+**Remaining conditions, stated honestly:**
+- Requires an Upstox account, so it is not credential-free the way NSE archives are — it is
+  *safe*-credential. The token cannot trade, cannot withdraw funds, and cannot read the portfolio
+  without a whitelisted static IP.
+- Annual rotation is a manual calendar item. It must be diarised, and the pipeline must alert on
+  401 rather than degrade silently.
+- Absence of a published price is not a guarantee of permanence. NSE archives remain primary
+  precisely so that no Upstox policy change can halt the system.
+
+**₹0 architecture: VALID, and strictly better than the Phase 0 design.**
+
+## A.3 — Unplanned finding: NSE archives throttle intermittently
+
+Re-running `scripts/verify_sources.py` several times produced **intermittent HTTP 403s that moved
+between paths run to run**: the delivery-data URL returned 200, then 403, then 200; `EQUITY_L.csv`
+returned 200, then 403, then 200. Cross-checks showed it is **not** User-Agent related — the
+honest UA succeeded on a URL that had just failed, while a browser UA failed on the same URL.
+
+**This is per-client throttling that recovers, not a block.** It is the concrete form of the
+"reliability concerns" flagged in §2.3.
+
+**Consequence:** a production loader that treats a single 403 as a source outage **will fail
+randomly**, perhaps weekly. Retry with exponential backoff is mandatory, not a nicety.
+
+`scripts/verify_sources.py` now retries up to 3 times with 2s/4s/8s backoff on 403, 429 and 5xx.
+Two consecutive full runs then passed 10/10. **Phase 1's NSE adapter must carry the same
+behaviour, and must alert only after retries are exhausted.**
+
+## A.4 — Summary
+
+| Item | Status | ₹0 architecture |
+|---|---|---|
+| **U1** — scheduled workflows, free private repo | **VERIFIED** — no plan or visibility restriction; 60-day auto-disable is public-repos-only | **Valid**, with 9.5× minute headroom |
+| **U3** — Upstox v3 after 30 Sep 2026 | **VERIFIED** — no official expiry, sunset or fee exists; v3 actively extended as recently as 4 Sep 2026 | **Valid** |
+| **U4** — undocumented no-token endpoint | **Effectively resolved** — a documented, supported alternative (Analytics Token) exists | **Valid** |
+| **New** — NSE intermittent 403 throttling | Found and mitigated in the checker | **Valid**, retry now mandatory in Phase 1 |
+
+**No alternative provider is required. No cost is introduced. Estimated monthly cost remains ₹0.**
+
+**Two corrections to the main report, applied here rather than by rewriting it:**
+1. §1.3 — the 60-day auto-disable does **not** apply to this private repository; the keepalive
+   workflow is unnecessary.
+2. §0.2 Correction 2 — the blanket claim that broker APIs cannot serve an unattended system is
+   **too strong for Upstox specifically**. It holds for OAuth+TOTP daily-token flows, and it
+   remains the reason NSE archives are primary. The Analytics Token is a documented exception.
