@@ -81,16 +81,48 @@ problem and makes the "never trades" guarantee a property of the credential rath
 code. And a real operational finding: **NSE archives throttle intermittently with HTTP 403**, so
 retry with backoff is mandatory — now implemented in `verify_sources.py`.
 
+## Phase 1 — data foundation (complete, pending your setup)
+
+Built and verified end to end against live NSE data and a real PostgreSQL 16 server:
+
+- **NSE adapter** (primary): bhavcopy, delivery data, universe, corporate actions
+- **Upstox Analytics Token adapter** (secondary): read-only adjusted history
+- **Retry/backoff** tuned to NSE's real throttling behaviour
+- **Point-in-time universe archiving** — the survivorship-bias control
+- **9-table PostgreSQL schema** with idempotent upserts and OHLC constraints
+- **Daily GitHub Action**, resumable and idempotent
+- **152 tests passing**
+
+Live run: **20,518 raw bars across 8 trading days, 2,580 universe symbols, 0 failures**.
+Re-running wrote nothing — idempotency verified. The corporate-action check computed and
+stored the Reliance bonus factor of **2.0** from live data.
+
+See [`docs/PHASE_1_REPORT.md`](docs/PHASE_1_REPORT.md).
+
+### Before it can run for real (about 10 minutes, needs your accounts)
+
+1. Create a free Neon project; add the connection string as repository secret `DATABASE_URL`.
+2. Optionally generate an Upstox **Analytics Token** (read-only, 1-year, cannot trade) and
+   add it as `UPSTOX_ANALYTICS_TOKEN`.
+3. Trigger `Daily data update` once via `workflow_dispatch` to create the schema.
+
+```bash
+# local development
+pip install -r requirements.txt -r requirements-dev.txt
+export DATABASE_URL=postgresql://...
+python3 scripts/daily_update.py --dry-run          # fetch only, no writes
+python3 scripts/daily_update.py                    # daily update with catch-up
+python3 scripts/backfill.py --source nse --start 2016-01-01   # chunked history
+python3 -m pytest tests/ -q
+```
+
 ## Next phase
 
-**Phase 1 — data foundation.** Database schema, source adapters, integrity checks, and the daily
-scheduled job. Highest-priority item:
+**Phase 2 — features and market context.** Not started, and it should not start yet.
 
-**Start point-in-time universe archiving.** This is time-sensitive: every day it is not running
-is a day of survivorship-bias control data that cannot be recovered later.
-
-Phase 1 does not begin until Phase 0 is reviewed and approved. See report section 14 for the
-full phase plan.
+First: connect Neon and let the daily job run unattended for ten consecutive trading days,
+then backfill 10 years of history. Point-in-time universe archiving only has value while it
+is actually running. See `docs/PHASE_1_REPORT.md` section 6.
 
 ## Legal
 

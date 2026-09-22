@@ -1,0 +1,5 @@
+# Runtime dependencies.
+# Deliberately minimal: the adapters and parsers use only the standard
+# library (csv, zipfile, json, urllib), so CI installs fast and there is
+# little supply-chain surface. No pandas is needed for Phase 1.
+psycopg[binary]>=3.1
