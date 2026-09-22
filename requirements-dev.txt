@@ -1,0 +1,3 @@
+# Phase 0 needs no runtime dependencies - scripts/verify_sources.py is stdlib only.
+# Test tooling only.
+pytest>=8.0
