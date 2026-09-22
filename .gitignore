@@ -1,0 +1,22 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+.env.*
+!.env.example
+
+# Generated reports - samples may be committed explicitly
+reports/*
+!reports/.gitkeep
+
+# Market data is never committed. See docs/PHASE_0_REPORT.md section 11
+# (NSE data policy restricts redistribution).
+data/
+*.csv
+*.csv.zip
+*.parquet
+
+.pytest_cache/
+.coverage
+.DS_Store
