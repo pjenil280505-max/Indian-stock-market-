@@ -75,7 +75,8 @@ def repo():
         cur.execute(
             "DROP TABLE IF EXISTS integrity_findings, adjustment_factors,"
             " corporate_actions, daily_bars_adjusted, daily_bars_raw,"
-            " universe_snapshots, ingestion_log, ingestion_runs, symbols CASCADE"
+            " universe_snapshots, universe_membership, ingestion_log,"
+            " ingestion_runs, symbols CASCADE"
         )
     conn.commit()
     apply_schema(conn)
@@ -110,6 +111,115 @@ class TestSymbolIdentity:
         assert repo.symbol_ids_by_ticker() == {"NEWNAME": first["INE002A01018"]}
 
 
+class TestUniverseIntervals:
+    """Interval semantics. Each failure here is a survivorship-bias bug."""
+
+    def test_first_run_opens_intervals(self, repo):
+        rows = [uni("A", "INE0A"), uni("B", "INE0B")]
+        ids = repo.upsert_symbols(rows)
+        assert repo.record_universe_snapshot(date(2026, 9, 21), rows, ids) == 2
+        assert repo.counts()["universe_membership"] == 2
+
+    def test_consecutive_days_extend_one_interval(self, repo):
+        """The whole point: 3 days of membership must not cost 3 rows."""
+        rows = [uni("A", "INE0A")]
+        ids = repo.upsert_symbols(rows)
+        for d in (date(2026, 9, 21), date(2026, 9, 22), date(2026, 9, 23)):
+            repo.record_universe_snapshot(d, rows, ids)
+        assert repo.counts()["universe_membership"] == 1
+        with repo.conn.cursor() as cur:
+            cur.execute("SELECT valid_from, valid_to FROM universe_membership")
+            assert cur.fetchone() == (date(2026, 9, 21), date(2026, 9, 23))
+
+    def test_weekend_gap_still_extends(self, repo):
+        """Extension compares to the PREVIOUS OBSERVATION, not to yesterday,
+        so weekends and holidays must not split an interval."""
+        rows = [uni("A", "INE0A")]
+        ids = repo.upsert_symbols(rows)
+        repo.record_universe_snapshot(date(2026, 9, 18), rows, ids)   # Friday
+        repo.record_universe_snapshot(date(2026, 9, 21), rows, ids)   # Monday
+        assert repo.counts()["universe_membership"] == 1
+
+    def test_rerunning_same_date_is_a_noop(self, repo):
+        rows = [uni("A", "INE0A")]
+        ids = repo.upsert_symbols(rows)
+        repo.record_universe_snapshot(date(2026, 9, 21), rows, ids)
+        repo.record_universe_snapshot(date(2026, 9, 21), rows, ids)
+        repo.record_universe_snapshot(date(2026, 9, 21), rows, ids)
+        assert repo.counts()["universe_membership"] == 1
+
+    def test_delist_then_relist_creates_a_second_interval(self, repo):
+        """Extending across the gap would falsely claim the symbol was listed
+        throughout - exactly the bias this table exists to prevent."""
+        a, b = uni("A", "INE0A"), uni("B", "INE0B")
+        ids = repo.upsert_symbols([a, b])
+        repo.record_universe_snapshot(date(2026, 9, 14), [a, b], ids)
+        repo.record_universe_snapshot(date(2026, 9, 15), [b], ids)      # A gone
+        repo.record_universe_snapshot(date(2026, 9, 16), [b], ids)
+        repo.record_universe_snapshot(date(2026, 9, 17), [a, b], ids)   # A returns
+
+        with repo.conn.cursor() as cur:
+            cur.execute(
+                "SELECT valid_from, valid_to FROM universe_membership"
+                " WHERE symbol_id = %s ORDER BY valid_from", (ids["INE0A"],))
+            assert cur.fetchall() == [
+                (date(2026, 9, 14), date(2026, 9, 14)),
+                (date(2026, 9, 17), date(2026, 9, 17)),
+            ]
+
+    def test_symbol_absent_during_gap_is_not_in_universe(self, repo):
+        a, b = uni("A", "INE0A"), uni("B", "INE0B")
+        ids = repo.upsert_symbols([a, b])
+        repo.record_universe_snapshot(date(2026, 9, 14), [a, b], ids)
+        repo.record_universe_snapshot(date(2026, 9, 15), [b], ids)
+        repo.record_universe_snapshot(date(2026, 9, 16), [a, b], ids)
+        assert [r[1] for r in repo.universe_on(date(2026, 9, 15))] == ["B"]
+        assert [r[1] for r in repo.universe_on(date(2026, 9, 14))] == ["A", "B"]
+
+    def test_series_change_opens_a_new_interval(self, repo):
+        eq = uni("A", "INE0A", series="EQ")
+        be = uni("A", "INE0A", series="BE")
+        ids = repo.upsert_symbols([eq])
+        repo.record_universe_snapshot(date(2026, 9, 21), [eq], ids)
+        repo.record_universe_snapshot(date(2026, 9, 22), [be], ids)
+        assert repo.counts()["universe_membership"] == 2
+        assert repo.universe_on(date(2026, 9, 21))[0][2] == "EQ"
+        assert repo.universe_on(date(2026, 9, 22))[0][2] == "BE"
+
+    def test_previous_observation_tracking(self, repo):
+        rows = [uni("A", "INE0A")]
+        ids = repo.upsert_symbols(rows)
+        assert repo.previous_universe_observation(date(2026, 9, 21)) is None
+        repo.record_universe_snapshot(date(2026, 9, 21), rows, ids)
+        assert repo.previous_universe_observation(date(2026, 9, 22)) == date(2026, 9, 21)
+
+    def test_storage_scales_with_changes_not_with_days(self, repo):
+        """60 stable days must cost 1 row, not 60."""
+        from datetime import timedelta
+
+        rows = [uni("A", "INE0A")]
+        ids = repo.upsert_symbols(rows)
+        day = date(2026, 1, 1)
+        for _ in range(60):
+            repo.record_universe_snapshot(day, rows, ids)
+            day += timedelta(days=1)
+        assert repo.counts()["universe_membership"] == 1
+
+    def test_range_constraint_rejects_inverted_interval(self, repo):
+        import psycopg
+
+        ids = repo.upsert_symbols([uni("A", "INE0A")])
+        with pytest.raises(psycopg.errors.CheckViolation):
+            with repo.conn.cursor() as cur:
+                cur.execute(
+                    "INSERT INTO universe_membership"
+                    " (symbol_id, series, valid_from, valid_to)"
+                    " VALUES (%s, 'EQ', %s, %s)",
+                    (ids["INE0A"], date(2026, 9, 22), date(2026, 9, 21)),
+                )
+        repo.conn.rollback()
+
+
 class TestPointInTimeUniverse:
     def test_snapshot_is_recorded(self, repo):
         rows = [uni("A", "INE0A"), uni("B", "INE0B")]
@@ -121,7 +231,7 @@ class TestPointInTimeUniverse:
         ids = repo.upsert_symbols(rows)
         repo.record_universe_snapshot(date(2026, 9, 21), rows, ids)
         repo.record_universe_snapshot(date(2026, 9, 21), rows, ids)
-        assert repo.counts()["universe_snapshots"] == 1
+        assert repo.counts()["universe_membership"] == 1
 
     def test_membership_is_reconstructible_per_date(self, repo):
         """The survivorship-bias control: what was listed on date D."""

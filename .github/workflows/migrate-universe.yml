@@ -1,0 +1,62 @@
+name: Migrate universe to intervals
+
+# One-off migration from universe_snapshots (one row per symbol per day) to
+# universe_membership (one row per continuous listing span).
+#
+# Run it twice: first with drop_old = false to build and verify the intervals,
+# then with drop_old = true once the verification output looks right. The
+# script refuses to drop anything unless verification passes.
+on:
+  workflow_dispatch:
+    inputs:
+      drop_old:
+        description: 'Drop universe_snapshots after verification passes'
+        required: true
+        type: boolean
+        default: false
+      verify_only:
+        description: 'Only verify; write nothing'
+        required: false
+        type: boolean
+        default: false
+
+concurrency:
+  # Shares the writer lock with the daily job and the backfill.
+  group: database-writer
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  migrate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: State before
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: python3 scripts/check_connection.py
+
+      - name: Migrate
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: |
+          python3 scripts/migrate_universe.py \
+            ${{ inputs.drop_old && '--drop-old' || '' }} \
+            ${{ inputs.verify_only && '--verify-only' || '' }}
+
+      - name: State after
+        if: always()
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: python3 scripts/check_connection.py

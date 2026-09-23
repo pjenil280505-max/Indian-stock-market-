@@ -16,20 +16,39 @@ CREATE TABLE IF NOT EXISTS symbols (
 );
 CREATE INDEX IF NOT EXISTS symbols_symbol_idx ON symbols (symbol);
 
--- Point-in-time universe membership.
--- One row per (snapshot_date, symbol). Reconstructing "what was listed on
--- date D" is then a single query, which is what makes survivorship-bias
--- control possible. This data CANNOT be backfilled later, which is why
--- archiving starts on day one of Phase 1.
-CREATE TABLE IF NOT EXISTS universe_snapshots (
-    snapshot_date DATE   NOT NULL,
+-- Point-in-time universe membership, stored as intervals.
+--
+-- Reconstructing "what was listed on date D" is what makes survivorship-bias
+-- control possible, and this data CANNOT be backfilled later.
+--
+-- An earlier design wrote one row per symbol per day: ~2,583 rows daily, or
+-- ~63 MB/year, to record membership that changes a few times a month. This
+-- stores one row per continuous listing span instead, which is both ~99%
+-- smaller and cheaper to query.
+--
+-- valid_to is the LAST DATE THE SYMBOL WAS OBSERVED in the universe, never
+-- NULL. Each daily run extends valid_to for symbols still present. A symbol
+-- that disappears simply stops being extended, so its interval is already
+-- closed at its true last-seen date - no separate delisting sweep, and no
+-- ambiguity between "still listed" and "the pipeline stopped running".
+--
+-- A symbol that is delisted and later relisted gets a SECOND interval; a
+-- symbol that changes series gets a new interval under the new series.
+CREATE TABLE IF NOT EXISTS universe_membership (
+    membership_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     symbol_id     BIGINT NOT NULL REFERENCES symbols (symbol_id),
     series        TEXT   NOT NULL,
+    valid_from    DATE   NOT NULL,
+    valid_to      DATE   NOT NULL,
     listing_date  DATE,
-    PRIMARY KEY (snapshot_date, symbol_id)
+    CONSTRAINT universe_membership_range CHECK (valid_to >= valid_from),
+    CONSTRAINT universe_membership_unique UNIQUE (symbol_id, series, valid_from)
 );
-CREATE INDEX IF NOT EXISTS universe_snapshots_symbol_idx
-    ON universe_snapshots (symbol_id, snapshot_date);
+-- Serves the point-in-time lookup: valid_from <= D AND valid_to >= D.
+CREATE INDEX IF NOT EXISTS universe_membership_range_idx
+    ON universe_membership (valid_from, valid_to);
+CREATE INDEX IF NOT EXISTS universe_membership_symbol_idx
+    ON universe_membership (symbol_id, valid_to DESC);
 
 -- Raw, as-traded bars from NSE. NOT adjusted for corporate actions.
 -- Use these for liquidity, tradability and position sizing.

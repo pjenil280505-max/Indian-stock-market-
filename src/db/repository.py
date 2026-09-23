@@ -111,28 +111,77 @@ class Repository:
             cur.execute("SELECT symbol, symbol_id FROM symbols")
             return {row[0]: row[1] for row in cur.fetchall()}
 
-    def record_universe_snapshot(self, snapshot_date: date, rows, symbol_ids) -> int:
-        """Archive point-in-time universe membership.
+    def previous_universe_observation(self, before: date) -> date | None:
+        """The most recent date on which the universe was observed, before `before`.
 
-        This is the survivorship-bias control. It cannot be reconstructed
-        after the fact, so it runs before anything else in the pipeline.
+        Interval extension compares against this rather than "yesterday",
+        which makes weekends and market holidays a non-issue: the gap between
+        consecutive observations is whatever it actually was.
         """
+        with self.conn.cursor() as cur:
+            cur.execute(
+                "SELECT max(valid_to) FROM universe_membership WHERE valid_to < %s",
+                (before,),
+            )
+            return cur.fetchone()[0]
+
+    def record_universe_snapshot(self, snapshot_date: date, rows, symbol_ids) -> int:
+        """Archive point-in-time universe membership as intervals.
+
+        For each symbol observed today, either extend its open interval or
+        open a new one. Storing spans rather than one row per symbol per day
+        is ~99% smaller and makes the point-in-time query cheaper.
+
+        The rules, and why each matters:
+
+        * A symbol whose latest interval ends at the previous observation is
+          still listed, so that interval is extended to today.
+        * A symbol with a GAP since its last interval was delisted and
+          relisted, so it gets a NEW interval. Extending across the gap would
+          falsely claim it was listed throughout - a survivorship-bias bug.
+        * A symbol whose series changed gets a new interval under the new
+          series, leaving the old one closed.
+        * Re-running for the same date is a no-op: the extension window
+          includes intervals already ending on `snapshot_date`.
+
+        Returns the number of symbols recorded as present on `snapshot_date`.
+        """
+        if not rows:
+            return 0
+
+        previous = self.previous_universe_observation(snapshot_date)
+        # On the very first run there is nothing to extend; a sentinel equal to
+        # snapshot_date makes the extension window match nothing, so every
+        # symbol opens a fresh interval.
+        extend_from = previous or snapshot_date
+
         payload = [
-            (snapshot_date, symbol_ids[r.isin], r.series, r.listing_date)
+            (
+                snapshot_date, symbol_ids[r.isin], r.series, extend_from, snapshot_date,
+                symbol_ids[r.isin], r.series, snapshot_date, snapshot_date, r.listing_date,
+            )
             for r in rows
             if r.isin in symbol_ids
         ]
         if not payload:
             return 0
+
         with self.conn.cursor() as cur:
             cur.executemany(
                 """
-                INSERT INTO universe_snapshots (snapshot_date, symbol_id, series, listing_date)
-                VALUES (%s, %s, %s, %s)
-                ON CONFLICT (snapshot_date, symbol_id) DO UPDATE SET
-                    series = EXCLUDED.series,
-                    listing_date = COALESCE(EXCLUDED.listing_date,
-                                            universe_snapshots.listing_date)
+                WITH extended AS (
+                    UPDATE universe_membership
+                       SET valid_to = %s
+                     WHERE symbol_id = %s
+                       AND series = %s
+                       AND valid_to >= %s
+                       AND valid_from <= %s
+                    RETURNING membership_id
+                )
+                INSERT INTO universe_membership
+                    (symbol_id, series, valid_from, valid_to, listing_date)
+                SELECT %s, %s, %s, %s, %s
+                 WHERE NOT EXISTS (SELECT 1 FROM extended)
                 """,
                 payload,
             )
@@ -140,17 +189,21 @@ class Repository:
         return len(payload)
 
     def universe_on(self, snapshot_date: date) -> list[tuple[int, str, str]]:
-        """What was listed on a given date: (symbol_id, symbol, series)."""
+        """What was listed on a given date: (symbol_id, symbol, series).
+
+        This is the survivorship-bias control. A symbol delisted after this
+        date still appears; one listed later does not.
+        """
         with self.conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT u.symbol_id, s.symbol, u.series
-                FROM universe_snapshots u
-                JOIN symbols s USING (symbol_id)
-                WHERE u.snapshot_date = %s
-                ORDER BY s.symbol
+                SELECT m.symbol_id, s.symbol, m.series
+                  FROM universe_membership m
+                  JOIN symbols s USING (symbol_id)
+                 WHERE m.valid_from <= %s AND m.valid_to >= %s
+                 ORDER BY s.symbol
                 """,
-                (snapshot_date,),
+                (snapshot_date, snapshot_date),
             )
             return cur.fetchall()
 
@@ -341,13 +394,18 @@ class Repository:
 
     def counts(self) -> dict[str, int]:
         tables = [
-            "symbols", "universe_snapshots", "daily_bars_raw",
+            "symbols", "universe_membership", "daily_bars_raw",
             "daily_bars_adjusted", "corporate_actions", "adjustment_factors",
             "ingestion_log", "integrity_findings",
         ]
         out: dict[str, int] = {}
         with self.conn.cursor() as cur:
             for table in tables:
+                # Tolerate a table that does not exist yet: a database part-way
+                # through the interval migration must still report its state.
+                cur.execute("SELECT to_regclass(%s)", (table,))
+                if cur.fetchone()[0] is None:
+                    continue
                 cur.execute(f"SELECT count(*) FROM {table}")  # noqa: S608 - fixed list
                 out[table] = cur.fetchone()[0]
         return out
