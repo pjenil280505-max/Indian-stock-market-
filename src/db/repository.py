@@ -333,6 +333,12 @@ class Repository:
             )
             return cur.fetchall()
 
+    def database_size_bytes(self) -> int:
+        """Total size of the current database, for free-tier headroom checks."""
+        with self.conn.cursor() as cur:
+            cur.execute("SELECT pg_database_size(current_database())")
+            return int(cur.fetchone()[0])
+
     def counts(self) -> dict[str, int]:
         tables = [
             "symbols", "universe_snapshots", "daily_bars_raw",

@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 import logging
 import sys
+import time
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
@@ -30,14 +31,60 @@ from src.sources.upstox import UpstoxSource  # noqa: E402
 
 log = logging.getLogger("backfill")
 
+# Neon free tier. The backfill stops before filling it rather than failing
+# mid-write: a partially full database is recoverable, a full one is not.
+FREE_TIER_BYTES = 0.5 * 1000**3
+DEFAULT_STOP_AT_FRACTION = 0.85
 
-def backfill_nse(repo: Repository, start: date, end: date, limit: int, run_id: int) -> int:
+
+class Budget:
+    """Stops a backfill cleanly before it hits a wall.
+
+    Two walls matter: the GitHub Actions job timeout, and the database free
+    tier. Hitting either mid-write wastes the run; stopping short of both
+    leaves the ingestion log consistent so the next run resumes exactly where
+    this one stopped.
+    """
+
+    def __init__(self, max_minutes: float, repo, stop_at_bytes: float, clock=time.monotonic):
+        self.deadline = clock() + max_minutes * 60 if max_minutes else None
+        self.repo = repo
+        self.stop_at_bytes = stop_at_bytes
+        self._clock = clock
+        self._checked = 0
+
+    def exhausted(self) -> str | None:
+        """Returns a reason to stop, or None to continue."""
+        if self.deadline and self._clock() >= self.deadline:
+            return "time budget reached"
+        # Size queries are cheap but not free; check every 10 dates.
+        self._checked += 1
+        if self.stop_at_bytes and self._checked % 10 == 0:
+            size = self.repo.database_size_bytes()
+            if size >= self.stop_at_bytes:
+                return (
+                    f"storage budget reached ({size / 1e6:.0f} MB of a "
+                    f"{self.stop_at_bytes / 1e6:.0f} MB cap)"
+                )
+        return None
+
+
+def backfill_nse(
+    repo: Repository, start: date, end: date, limit: int, run_id: int,
+    budget: "Budget | None" = None,
+) -> int:
     nse = NseSource()
     settled = repo.settled_dates(NSE_SOURCE)
-    pending = [d for d in integrity.candidate_dates(start, end) if d not in settled]
+    # Newest first: if the budget runs out, the most useful history is already
+    # in place and older dates simply wait for the next run.
+    pending = sorted(
+        (d for d in integrity.candidate_dates(start, end) if d not in settled),
+        reverse=True,
+    )
+    total_outstanding = len(pending)
     if limit:
         pending = pending[:limit]
-    log.info("%d date(s) outstanding in range", len(pending))
+    log.info("%d date(s) outstanding in range; attempting %d", total_outstanding, len(pending))
 
     ticker_ids = repo.symbol_ids_by_ticker()
     if not ticker_ids:
@@ -48,6 +95,11 @@ def backfill_nse(repo: Repository, start: date, end: date, limit: int, run_id: i
 
     loaded = 0
     for trade_date in pending:
+        if budget:
+            reason = budget.exhausted()
+            if reason:
+                log.warning("stopping early: %s - re-run to continue", reason)
+                break
         try:
             bars = nse.fetch_daily_bars(trade_date)
         except Exception as exc:  # noqa: BLE001
@@ -99,6 +151,14 @@ def main() -> int:
     parser.add_argument("--start", required=True, help="YYYY-MM-DD")
     parser.add_argument("--end", help="YYYY-MM-DD (default: yesterday)")
     parser.add_argument("--limit", type=int, default=0, help="cap the batch size; 0 = no cap")
+    parser.add_argument(
+        "--max-minutes", type=float, default=0,
+        help="stop cleanly after this many minutes so a CI job never times out mid-write",
+    )
+    parser.add_argument(
+        "--stop-at-mb", type=float, default=FREE_TIER_BYTES * DEFAULT_STOP_AT_FRACTION / 1e6,
+        help="stop when the database reaches this size (MB); 0 disables the guard",
+    )
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(message)s")
@@ -118,9 +178,10 @@ def main() -> int:
         apply_schema(conn)
         repo = Repository(conn)
         run_id = repo.start_run(settings.commit_sha)
+        budget = Budget(args.max_minutes, repo, args.stop_at_mb * 1e6 if args.stop_at_mb else 0)
         try:
             if args.source == "nse":
-                total = backfill_nse(repo, start, end, args.limit, run_id)
+                total = backfill_nse(repo, start, end, args.limit, run_id, budget)
             else:
                 if not settings.has_upstox:
                     log.error("UPSTOX_ANALYTICS_TOKEN is not set")
@@ -133,7 +194,8 @@ def main() -> int:
         except Exception as exc:  # noqa: BLE001
             repo.finish_run(run_id, "failed", repr(exc))
             raise
-    log.info("backfill complete: %d rows", total)
+    log.info("backfill batch complete: %d rows written", total)
+    log.info("re-run the same command to continue; loaded dates are skipped")
     return 0
 
 

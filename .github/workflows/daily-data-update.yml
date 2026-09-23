@@ -38,6 +38,11 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
+      - name: Check connection
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: python3 scripts/check_connection.py
+
       - name: Run data update
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}

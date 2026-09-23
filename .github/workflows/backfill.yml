@@ -1,0 +1,78 @@
+name: Historical backfill
+
+# Manual only - never scheduled. A backfill is a deliberate operation.
+# Runs in bounded batches: each run stops cleanly on its time or storage
+# budget and records progress, so re-running continues where it stopped.
+# Trigger it from the GitHub mobile app: Actions -> Historical backfill -> Run workflow.
+on:
+  workflow_dispatch:
+    inputs:
+      source:
+        description: 'Data source'
+        required: true
+        type: choice
+        options: [nse, upstox]
+        default: nse
+      start:
+        description: 'Start date (YYYY-MM-DD)'
+        required: true
+        default: '2024-01-01'
+      end:
+        description: 'End date (YYYY-MM-DD, blank = yesterday)'
+        required: false
+        default: ''
+      max_minutes:
+        description: 'Stop after this many minutes'
+        required: false
+        default: '240'
+      stop_at_mb:
+        description: 'Stop when the database reaches this size in MB (0 disables)'
+        required: false
+        default: '425'
+
+concurrency:
+  # Never run a backfill alongside the daily update or another backfill.
+  group: database-writer
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  backfill:
+    runs-on: ubuntu-latest
+    # Below the 6-hour hard limit; the job's own budget stops it earlier.
+    timeout-minutes: 330
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Check connection and headroom
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: python3 scripts/check_connection.py
+
+      - name: Run backfill batch
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          UPSTOX_ANALYTICS_TOKEN: ${{ secrets.UPSTOX_ANALYTICS_TOKEN }}
+          GITHUB_SHA: ${{ github.sha }}
+        run: |
+          python3 scripts/backfill.py \
+            --source "${{ inputs.source }}" \
+            --start "${{ inputs.start }}" \
+            ${{ inputs.end && format('--end {0}', inputs.end) || '' }} \
+            --max-minutes "${{ inputs.max_minutes }}" \
+            --stop-at-mb "${{ inputs.stop_at_mb }}"
+
+      - name: Report remaining work
+        if: always()
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: python3 scripts/check_connection.py
