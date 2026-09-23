@@ -272,3 +272,95 @@ Two Phase 1 statements are superseded:
 2. CI had been failing since 2026-09-22 and the first Phase 1 report did not mention it.
    That was an omission: a red CI pipeline should have been reported at the time rather
    than discovered two days later while debugging something else.
+
+---
+
+# Addendum C — universe_snapshots compacted to intervals (2026-09-23)
+
+**Status: done and live on Neon.** The growth constraint from §B.5 is resolved.
+
+## C.1 What changed
+
+`universe_snapshots(snapshot_date, symbol_id, series, listing_date)` — one row per symbol
+per day — is replaced by:
+
+```sql
+universe_membership(membership_id, symbol_id, series, valid_from, valid_to, listing_date)
+```
+
+`valid_to` is the **last date the symbol was observed**, never NULL. Each daily run extends
+it for symbols still present; a symbol that disappears simply stops being extended, so its
+interval is already closed at its true last-seen date. That removes the ambiguity a nullable
+`valid_to` would create between "still listed" and "the pipeline stopped running", and needs
+no separate delisting sweep.
+
+Point-in-time reconstruction is `valid_from <= D AND valid_to >= D` — one indexed range
+scan, cheaper than the old per-date equality lookup.
+
+## C.2 The four rules, and the bias each one guards
+
+| Rule | Why it exists |
+|---|---|
+| Extension compares against the **previous observation date**, not against "yesterday" | Weekends and market holidays would otherwise split every interval |
+| A **gap** since the last interval opens a **new** interval | Extending across a gap would falsely claim the symbol was listed throughout — a survivorship-bias bug |
+| A **series change** opens a new interval under the new series | `EQ → BE` is a real change in tradability, not a continuation |
+| Re-running for the same date is a **no-op** | Scheduled runs are delayed, retried and caught up |
+
+## C.3 Migration safety
+
+Universe membership is the survivorship-bias control and cannot be rebuilt if lost, so
+`scripts/migrate_universe.py` is deliberately cautious:
+
+1. Collapse snapshots into intervals with a gaps-and-islands query.
+2. **Verify**: for every observed date, the set of `(symbol, series)` returned by the
+   interval table must exactly equal the snapshot rows — checked with a symmetric `EXCEPT`
+   in both directions.
+3. Drop the old table **only** with an explicit `--drop-old`, and **only** if verification
+   passed.
+
+Tested locally on a seeded fixture covering the hard cases — always-present, delist and
+relist, series change, late listing — which collapsed 31 snapshot rows into exactly the 6
+expected intervals:
+
+```
+A  EQ  2026-09-14 .. 2026-09-23     (present throughout)
+B  EQ  2026-09-14 .. 2026-09-15     (delisted)
+B  EQ  2026-09-18 .. 2026-09-23     (relisted - separate interval)
+C  EQ  2026-09-14 .. 2026-09-18     (series change)
+C  BE  2026-09-19 .. 2026-09-23
+D  EQ  2026-09-21 .. 2026-09-23     (listed late)
+```
+
+## C.4 Applied to Neon
+
+| Step | Result |
+|---|---|
+| Build intervals | 2,583 rows built from 2,583 snapshot rows |
+| Verification | **PASSED** — "interval table reproduces every snapshot exactly" |
+| Drop old table | Done; `universe_snapshots` no longer present |
+| Daily pipeline after migration | **Clean run** — `findings=0 (errors=0)`, `halted=False` |
+| Database size | 339.8 MB, unchanged |
+
+**Honest scope of the saving: this reclaimed essentially nothing today.** The Neon table held
+a single day of snapshots, so 2,583 rows became 2,583 intervals — a 0% reduction. The entire
+benefit is prospective.
+
+## C.5 The growth picture now
+
+| | Before | After |
+|---|---|---|
+| Universe rows per day | ~2,583 | ~0 (extends existing rows in place) |
+| Universe growth | ~63 MB/year | **~0.1 MB/year** (only genuine listing changes) |
+| Total growth | ~189 MB/year | **~126 MB/year** (daily bars only) |
+| Free-tier runway from 160 MB | ~10 months | **~15 months** |
+
+Daily bars are now the only meaningful growth, and they are irreducible without dropping
+history or narrowing the universe. Verified locally: 60 consecutive daily runs against a
+stable universe produced **1** interval row, not 60.
+
+## C.6 Tests
+
+172 pass, including ten new interval-semantics tests covering consecutive-day extension,
+weekend gaps, same-date re-runs, delist-and-relist, series change, absence during a gap,
+previous-observation tracking, storage scaling with changes rather than days, and the
+range constraint.

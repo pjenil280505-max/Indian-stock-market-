@@ -115,9 +115,10 @@ Running unattended in GitHub Actions against Neon (PostgreSQL 18.6):
 Idempotency verified in the cloud: a second identical daily run wrote **0 rows**, and
 re-running the completed backfill left the row count and database size unchanged.
 
-**Known constraint:** ~160 MB headroom against ~189 MB/year growth means the free tier fills
-in roughly 10 months. Most of that is `universe_snapshots` storing 2,583 rows/day for
-membership that rarely changes — see `docs/PHASE_1_REPORT.md` section B.5.
+Universe membership is stored as **change-intervals** (`valid_from`/`valid_to`), not one row
+per symbol per day — so a stable universe costs one row, not one per day. That cut growth from
+~189 MB/year to ~126 MB/year and extended the free-tier runway from ~10 to ~15 months. Daily
+bars are now the only meaningful growth. See `docs/PHASE_1_REPORT.md` section C.
 
 Still optional: `UPSTOX_ANALYTICS_TOKEN` (read-only, 1-year, cannot trade). Without it,
 adjusted bars and the corporate-action cross-check stay dormant; the pipeline warns and
@@ -137,9 +138,8 @@ python3 -m pytest tests/ -q
 
 **Phase 2 — features and market context.** Not started; awaiting review.
 
-Before it begins, two things are worth settling: let the scheduled job run unattended for
-several consecutive trading days (it has never yet fired on its own schedule), and decide
-how to handle the `universe_snapshots` storage growth described in report section B.5.
+Before it begins, one thing is still unproven: the scheduled job has never fired on its own.
+Let it run unattended for several consecutive trading days first.
 
 ## Legal
 
