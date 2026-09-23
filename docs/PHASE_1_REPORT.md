@@ -162,3 +162,113 @@ because it belongs against your real database, not a throwaway local one.
 Then Phase 2 proper: features with as-of timestamps, the market/sector/regime layer, and
 the full Indian transaction-cost model — with the adversarial lookahead tests written
 *before* the features they guard.
+
+---
+
+# Addendum B — Cloud deployment verified against Neon (2026-09-23)
+
+**Status: PASS.** The pipeline now runs in GitHub Actions against Neon, unattended.
+All figures below are read from real workflow logs, not local runs.
+
+## B.1 The blocker was GitHub Actions billing, not code
+
+Every workflow run had been failing in 2–4 seconds with `runner_id: 0`, zero steps and no
+log file — including CI runs from before any secret existed, and CI never reads
+`DATABASE_URL`. GitHub was creating the job and then refusing to allocate a runner. Nothing
+in the repository could affect that.
+
+Making the repository public (public repos get unlimited free Actions minutes) resolved it
+immediately: runner `1000000849` was assigned within 4 seconds and the job ran to completion.
+
+Before publishing, the full git history was scanned: no credentials, no data files, no
+`.env`. Two pattern hits were benign — the CI service container's throwaway
+`postgres:postgres@localhost`, and the literal strings `"neon.tech"` / `"sslmode=require"`
+used as detection logic. All six commits were then rewritten to replace the author's
+personal email with the GitHub `noreply` address; file trees were byte-identical before and
+after (`a823fc0`), and 162 tests passed on the rewritten tree.
+
+## B.2 Cloud verification
+
+| Check | Evidence from the run log |
+|---|---|
+| Neon connection | `target: Neon (serverless PostgreSQL)` |
+| Server version | `PostgreSQL 18.6 (6569466) on aarch64-unknown-linux-gnu` |
+| Schema | `schema: applied (idempotent - safe to re-run)` |
+| Data written | 17,971 raw bars across 7 trading days on the first run |
+| Secret exposure | `DATABASE_URL: ***` — masked by GitHub; no host, user or password in any log |
+| Integrity | `findings=0 (errors=0)`, `dates_failed=[]`, `halted=False` |
+
+**Neon runs PostgreSQL 18.6, not 16.** The schema applied cleanly on both, so no change was
+needed — but the Phase 1 assumption of "Postgres 16" was wrong and is corrected here.
+
+**GitHub runners see no NSE throttling.** The 403s that forced the jittered backoff in this
+project's development container did not occur once from GitHub's network. The retry logic
+never engaged. It stays in place for exactly the environments where it does.
+
+## B.3 Idempotency, proven twice in the cloud
+
+Daily pipeline, two identical runs three minutes apart:
+
+| | Run 1 | Run 2 |
+|---|---|---|
+| `dates_loaded` | 7 dates | `[]` |
+| `raw_bars_written` | 17,971 | **0** |
+| Data-step duration | 9 s | 2 s |
+
+Backfill, re-run after completion: `daily_bars_raw` unchanged at 1,599,991 and database size
+unchanged at 339.8 MB. The backfill step completed in **0 seconds** — nothing outstanding.
+
+## B.4 Three-year backfill
+
+Range 2023-09-01 to 2026-09-22, run via the `Historical backfill` workflow.
+
+| Metric | Value |
+|---|---|
+| Runtime | **13 min 43 s** (budget was 240 min) |
+| Rows written | **1,599,991** daily bars |
+| Dates processed | **799** ingestion-log entries = all 798 weekdays + the universe snapshot |
+| Failed dates | **0** |
+| Integrity findings | **0** |
+| Database size | **339.8 MB (68.0% of the 0.5 GB free tier)** |
+| Headroom | **160 MB** |
+
+The storage guard (425 MB) was never reached. Actual usage came in below the 394 MB
+projection, because the listed universe was smaller in 2023 than today.
+
+## B.5 The constraint that now matters most
+
+At 160 MB headroom and roughly 189 MB/year of ongoing growth — about 126 MB/year of daily
+bars plus 63 MB/year of universe snapshots — **the free tier fills in approximately 10
+months of unattended daily operation.**
+
+The avoidable half of that is `universe_snapshots`, which writes 2,583 rows every day to
+record membership that changes only a few times a month. Storing membership intervals
+(`symbol_id, series, valid_from, valid_to`) instead of daily rows would cut it by well over
+99% and extend the runway to several years. That is a schema change, so it was not made
+unilaterally; it is the single highest-value item available and should be decided before
+the headroom is spent.
+
+Options, in order of cost:
+1. **Compact `universe_snapshots` to change-intervals** — free, removes ~63 MB/year, and
+   makes point-in-time reconstruction cheaper rather than harder.
+2. **Trim the stored universe for bars** — exclude perpetually illiquid symbols from daily
+   bar storage. Reduces research scope, so it is a real trade.
+3. **Neon paid tier** — roughly $19/month. Not required yet.
+
+## B.6 Scheduled operation
+
+`cron: '0 13 * * 1-5'` — 13:00 UTC = **18:30 IST**, Monday to Friday, 180 minutes after the
+15:30 IST close, off the top of the hour to avoid GitHub's peak scheduling delay. The
+workflow is on the default branch, which is what makes the `schedule` event fire at all.
+It has not yet been observed firing on its own; the next opportunity is the coming weekday
+at 13:00 UTC.
+
+## B.7 Corrected record
+
+Two Phase 1 statements are superseded:
+
+1. "Verified against a real PostgreSQL 16.13 server, which Neon is" — Neon is **18.6**. The
+   verification still transfers, but the version was assumed rather than checked.
+2. CI had been failing since 2026-09-22 and the first Phase 1 report did not mention it.
+   That was an omission: a red CI pipeline should have been reported at the time rather
+   than discovered two days later while debugging something else.

@@ -99,12 +99,29 @@ stored the Reliance bonus factor of **2.0** from live data.
 
 See [`docs/PHASE_1_REPORT.md`](docs/PHASE_1_REPORT.md).
 
-### Before it can run for real (about 10 minutes, needs your accounts)
+### Live in the cloud
 
-1. Create a free Neon project; add the connection string as repository secret `DATABASE_URL`.
-2. Optionally generate an Upstox **Analytics Token** (read-only, 1-year, cannot trade) and
-   add it as `UPSTOX_ANALYTICS_TOKEN`.
-3. Trigger `Daily data update` once via `workflow_dispatch` to create the schema.
+Running unattended in GitHub Actions against Neon (PostgreSQL 18.6):
+
+| | |
+|---|---|
+| Daily bars stored | **1,599,991** (2023-09-01 to 2026-09-22) |
+| Universe | 2,583 symbols, archived point-in-time daily |
+| Trading dates settled | 799, **0 failed**, **0 integrity findings** |
+| Database | **339.8 MB / 0.5 GB free tier**, 160 MB headroom |
+| Backfill runtime | 13 min 43 s |
+| Schedule | `0 13 * * 1-5` = **18:30 IST**, Mon–Fri |
+
+Idempotency verified in the cloud: a second identical daily run wrote **0 rows**, and
+re-running the completed backfill left the row count and database size unchanged.
+
+**Known constraint:** ~160 MB headroom against ~189 MB/year growth means the free tier fills
+in roughly 10 months. Most of that is `universe_snapshots` storing 2,583 rows/day for
+membership that rarely changes — see `docs/PHASE_1_REPORT.md` section B.5.
+
+Still optional: `UPSTOX_ANALYTICS_TOKEN` (read-only, 1-year, cannot trade). Without it,
+adjusted bars and the corporate-action cross-check stay dormant; the pipeline warns and
+continues.
 
 ```bash
 # local development
@@ -118,11 +135,11 @@ python3 -m pytest tests/ -q
 
 ## Next phase
 
-**Phase 2 — features and market context.** Not started, and it should not start yet.
+**Phase 2 — features and market context.** Not started; awaiting review.
 
-First: connect Neon and let the daily job run unattended for ten consecutive trading days,
-then backfill 10 years of history. Point-in-time universe archiving only has value while it
-is actually running. See `docs/PHASE_1_REPORT.md` section 6.
+Before it begins, two things are worth settling: let the scheduled job run unattended for
+several consecutive trading days (it has never yet fired on its own schedule), and decide
+how to handle the `universe_snapshots` storage growth described in report section B.5.
 
 ## Legal
 
