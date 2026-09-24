@@ -665,3 +665,62 @@ estimate; confirm on Neon's pricing page before any purchase decision.
 - **Public-repository scheduled workflows are auto-disabled after 60 days without repository
   activity** (GitHub's documented rule, which Phase 0 noted applied to public repositories
   only; this repository is now public).
+
+---
+
+# Addendum G — Phase 1b: Cloudflare Cron → GitHub dispatch trigger (2026-09-24)
+
+**Status: built and verified locally; not yet deployed.** Deployment needs three repository
+secrets that only the account owner can create (see G.3). No Cloudflare resource exists yet.
+
+## G.1 What was built
+
+A Cloudflare Worker (`cloudflare/dispatcher`, name `nse-pipeline-dispatcher`) whose only job
+is `POST /repos/…/actions/workflows/<file>/dispatches` to the GitHub API. The Python pipeline
+stays on GitHub runners, under the unchanged `database-writer` lock. The Worker never contacts
+Neon, NSE or Upstox (enforced by `tests/test_cloudflare_guards.py`).
+
+| Invocation | Target workflow | State |
+|---|---|---|
+| test (cron `37 4 * * *` UTC, or the key-guarded test endpoint) | `cloudflare-dispatch-probe.yml`: no checkout, no secrets, `permissions: {}` | active once deployed |
+| production | `daily-data-update.yml` (input `catchup_days`) | **disabled**: needs `PRODUCTION_ENABLED="true"` and a cron in `PRODUCTION_CRONS` |
+
+## G.2 Why the test target is a probe and not the daily workflow
+
+Dispatching `daily-data-update.yml` is not a no-op against Neon even when every date is
+already loaded: run #10 on 2026-09-24 inserted an `ingestion_runs` row and upserted
+`corporate_actions=2`. Using it as the Cloudflare test would therefore write to Neon, which
+Phase 1b forbids. The probe proves the same path, from Cloudflare cron to a GitHub run
+starting, with no database contact, and it measures the dispatch-to-start delay.
+
+## G.3 Credentials (manual; never in source or chat)
+
+| GitHub secret | Create as | Minimum scope |
+|---|---|---|
+| `CLOUDFLARE_API_TOKEN` | Cloudflare custom API token | Account → Workers Scripts: Edit, this account only |
+| `CLOUDFLARE_ACCOUNT_ID` | Account ID | — |
+| `GH_DISPATCH_TOKEN` | GitHub fine-grained PAT | This repository only; Actions: Read and write |
+
+**Limit of the GitHub token, stated plainly:** GitHub cannot scope a token to a single
+workflow. `Actions: write` on this repository also allows dispatching *any* workflow
+(including backfill and migrations), cancelling or re-running runs, deleting run logs, and
+enabling or disabling workflows. The Worker's code allowlist limits what *the Worker* can do,
+not what the token can do if it leaks.
+
+## G.4 Verified so far
+
+- 22 Worker unit tests, plus 18 Python guard tests. The Python suite went from 243 to 262,
+  with one extra test for the `migrate.py status` fingerprint.
+- Local run in Wrangler's workerd runtime, with a loopback stub standing in for GitHub. The test
+  cron dispatched only the probe, with the expected path, headers and inputs. An unconfigured
+  cron dispatched nothing. Wrong key gave 401 and GET gave 404. No token or key appeared in any log.
+- `check-secrets` (run 36058353183): all three secrets MISSING, as expected before setup.
+- Neon baseline for the Phase 1b tests (`migrate.py status`, read-only, run 36058423103):
+  `daily_bars_raw` 1,605,146 rows, digest 296770750422; `universe_membership` 2,585,
+  digest -39741809479; `symbols` 2,585, digest 57018452335. These are identical to the Phase 1a
+  post-migration fingerprint.
+
+## G.5 Remaining to PASS
+
+Create the three secrets, then run **Actions → Cloudflare Worker** with `local-test` and then
+`deploy-and-test`, and re-run `migrate.py status` to confirm the fingerprint is unchanged.
