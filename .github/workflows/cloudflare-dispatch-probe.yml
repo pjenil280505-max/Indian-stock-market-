@@ -1,0 +1,67 @@
+name: Cloudflare dispatch probe
+
+# Target of the Cloudflare Worker's TEST invocations (Phase 1b).
+#
+# Deliberately does nothing: no checkout, no secrets, no database, no NSE,
+# no GITHUB_TOKEN permissions. It exists to prove the path
+#   Cloudflare Cron -> Worker -> GitHub workflow_dispatch -> run starts
+# without touching Neon, and to measure how late GitHub starts a dispatched
+# run relative to the Cloudflare scheduled time.
+#
+# Inputs arrive from outside GitHub, so they are passed through env vars and
+# never interpolated into shell code.
+run-name: "Cloudflare probe (${{ inputs.invocation }}) ${{ inputs.request_id }}"
+
+on:
+  workflow_dispatch:
+    inputs:
+      invocation:
+        description: 'Invocation kind - only "test" is accepted'
+        required: true
+        type: choice
+        options: [test]
+      cron:
+        description: 'Cron expression that fired (UTC), or manual-test'
+        required: false
+        default: ''
+      scheduled_time:
+        description: 'Cloudflare scheduled time, ISO-8601 UTC'
+        required: false
+        default: ''
+      request_id:
+        description: 'Worker request id, for matching Worker logs to this run'
+        required: false
+        default: ''
+
+concurrency:
+  group: cloudflare-dispatch-probe
+  cancel-in-progress: false
+
+permissions: {}
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Record the dispatch
+        env:
+          INVOCATION: ${{ inputs.invocation }}
+          CRON: ${{ inputs.cron }}
+          SCHEDULED: ${{ inputs.scheduled_time }}
+          REQUEST_ID: ${{ inputs.request_id }}
+          ACTOR: ${{ github.actor }}
+        run: |
+          set -euo pipefail
+          now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          printf 'invocation:     %s\n' "$INVOCATION"
+          printf 'cron (UTC):     %s\n' "$CRON"
+          printf 'scheduled UTC:  %s\n' "$SCHEDULED"
+          printf 'started UTC:    %s\n' "$now"
+          printf 'request_id:     %s\n' "$REQUEST_ID"
+          printf 'dispatched by:  %s\n' "$ACTOR"
+          if sched=$(date -u -d "$SCHEDULED" +%s 2>/dev/null); then
+            printf 'start delay:    %s s after the Cloudflare scheduled time\n' "$(( $(date -u +%s) - sched ))"
+          fi
+          test "$INVOCATION" = "test"
+          echo "Probe only: no data fetched, nothing written anywhere."

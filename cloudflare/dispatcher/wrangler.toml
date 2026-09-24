@@ -1,0 +1,35 @@
+# Cloudflare Worker: Cron -> GitHub workflow_dispatch. Phase 1b: TEST ONLY.
+#
+# No secrets live in this file. The Worker's two secrets are uploaded at
+# deploy time by .github/workflows/cloudflare-worker.yml from GitHub Secrets:
+#   GH_DISPATCH_TOKEN  fine-grained PAT, this repo only, Actions: write
+#   TEST_TRIGGER_KEY   random per deploy, rotated away after the smoke test
+name = "nse-pipeline-dispatcher"
+main = "src/index.js"
+compatibility_date = "2026-09-01"
+
+# workers.dev is needed only for the one-shot deployed smoke test. Every path
+# except POST /__test-dispatch returns 404, and that one needs a key nobody
+# holds once the deploy workflow has rotated it.
+workers_dev = true
+preview_urls = false
+
+[triggers]
+# TEST schedule, UTC: once a day at 04:37 (10:07 IST, during market hours,
+# deliberately unlike the production 11:41/14:17 fires). Each fire dispatches
+# only the no-op probe workflow, which records how late GitHub starts it.
+crons = ["37 4 * * *"]
+
+[vars]
+GITHUB_OWNER = "pjenil280505-max"
+GITHUB_REPO = "Indian-stock-market-"
+GITHUB_REF = "main"
+TEST_CRONS = "37 4 * * *"
+# Production is OFF. Enabling it needs BOTH of these changed, a cron added to
+# [triggers], and a reviewed commit - see cloudflare/dispatcher/README.md.
+PRODUCTION_CRONS = ""
+PRODUCTION_ENABLED = "false"
+
+[observability]
+enabled = true
+head_sampling_rate = 1

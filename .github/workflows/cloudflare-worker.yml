@@ -1,0 +1,174 @@
+name: Cloudflare Worker
+
+# Deploys and tests the Cron -> GitHub dispatcher in cloudflare/dispatcher.
+# Manual only. Never touches Neon (no DATABASE_URL here), never runs the
+# data pipeline, and can only cause the no-op probe workflow to run.
+#
+#   check-secrets    Report which required secrets are set (yes/no only).
+#   local-test       Run the Worker in Wrangler's local runtime on this runner
+#                    and fire its TEST cron. Makes one REAL dispatch of the
+#                    probe workflow using GH_DISPATCH_TOKEN. Needs no
+#                    Cloudflare credentials.
+#   deploy-and-test  Deploy to Cloudflare, invoke the DEPLOYED Worker once
+#                    through its key-guarded test endpoint (one probe
+#                    dispatch), then rotate the key to a value nobody holds.
+#
+# Secrets (repository secrets; values never printed):
+#   CLOUDFLARE_API_TOKEN   Account token, Workers Scripts: Edit, this account only
+#   CLOUDFLARE_ACCOUNT_ID
+#   GH_DISPATCH_TOKEN      Fine-grained PAT, this repo only, Actions: read and write
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: 'What to do'
+        required: true
+        type: choice
+        options: [check-secrets, local-test, deploy-and-test]
+        default: check-secrets
+
+concurrency:
+  group: cloudflare-worker
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  TEST_CRON: '37 4 * * *'
+
+jobs:
+  worker:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: cloudflare/dispatcher
+    steps:
+      - name: Secrets present?
+        working-directory: .
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          GH_DISPATCH_TOKEN: ${{ secrets.GH_DISPATCH_TOKEN }}
+          ACTION: ${{ inputs.action }}
+        run: |
+          missing=0
+          for name in CLOUDFLARE_API_TOKEN CLOUDFLARE_ACCOUNT_ID GH_DISPATCH_TOKEN; do
+            if [ -n "${!name}" ]; then echo "$name: present"; else echo "$name: MISSING"; missing=1; fi
+          done
+          case "$ACTION" in
+            local-test)      [ -n "$GH_DISPATCH_TOKEN" ] || { echo "::error::GH_DISPATCH_TOKEN is required"; exit 1; } ;;
+            deploy-and-test) [ "$missing" = 0 ] || { echo "::error::all three secrets are required"; exit 1; } ;;
+          esac
+
+      - if: inputs.action != 'check-secrets'
+        uses: actions/checkout@v4
+
+      - if: inputs.action != 'check-secrets'
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install and unit-test
+        if: inputs.action != 'check-secrets'
+        run: |
+          npm ci --no-audit --no-fund
+          npm test
+
+      # ---------------------------------------------------------- local-test
+      - name: Local cron test (real dispatch of the probe workflow)
+        if: inputs.action == 'local-test'
+        env:
+          GH_DISPATCH_TOKEN: ${{ secrets.GH_DISPATCH_TOKEN }}
+        run: |
+          set -euo pipefail
+          umask 077
+          printf 'GH_DISPATCH_TOKEN=%s\n' "$GH_DISPATCH_TOKEN" > .dev.vars
+          npx wrangler dev --test-scheduled --ip 127.0.0.1 --port 8787 \
+            --show-interactive-dev-session=false > "$RUNNER_TEMP/dev.log" 2>&1 &
+          pid=$!
+          for i in $(seq 1 60); do curl -s -o /dev/null http://127.0.0.1:8787/ && break; sleep 1; done
+          curl -sf "http://127.0.0.1:8787/cdn-cgi/local/scheduled?cron=${TEST_CRON// /+}"
+          echo
+          sleep 3
+          kill "$pid" || true
+          rm -f .dev.vars
+          echo "--- Worker log events"
+          grep -E '"event"' "$RUNNER_TEMP/dev.log" || true
+          grep -q '"event":"dispatch_ok"' "$RUNNER_TEMP/dev.log"
+
+      # ----------------------------------------------------- deploy-and-test
+      - name: Deploy
+        id: deploy
+        if: inputs.action == 'deploy-and-test'
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          GH_DISPATCH_TOKEN: ${{ secrets.GH_DISPATCH_TOKEN }}
+        run: |
+          set -euo pipefail
+          umask 077
+          key=$(openssl rand -hex 32)
+          echo "::add-mask::$key"
+          echo "TEST_KEY=$key" >> "$GITHUB_ENV"
+          SECRETS_FILE="$RUNNER_TEMP/worker.secrets.json" KEY="$key" python3 - <<'PY'
+          import json, os
+          with open(os.environ["SECRETS_FILE"], "w") as f:
+              json.dump({"GH_DISPATCH_TOKEN": os.environ["GH_DISPATCH_TOKEN"],
+                         "TEST_TRIGGER_KEY": os.environ["KEY"]}, f)
+          PY
+          npx wrangler deploy --secrets-file "$RUNNER_TEMP/worker.secrets.json" 2>&1 | tee "$RUNNER_TEMP/deploy.log"
+          rm -f "$RUNNER_TEMP/worker.secrets.json"
+          url=$(grep -oE 'https://nse-pipeline-dispatcher\.[a-z0-9-]+\.workers\.dev' "$RUNNER_TEMP/deploy.log" | head -1 || true)
+          if [ -z "$url" ]; then
+            echo "::error::No workers.dev URL in deploy output. Open Workers & Pages in the Cloudflare dashboard once to register a workers.dev subdomain, then re-run."
+            exit 1
+          fi
+          echo "url=$url" >> "$GITHUB_OUTPUT"
+
+      - name: Invoke the deployed Worker once (test mode)
+        if: inputs.action == 'deploy-and-test'
+        env:
+          URL: ${{ steps.deploy.outputs.url }}
+        run: |
+          set -uo pipefail
+          # A new deployment or subdomain can take a little while to be served.
+          # Retry only while the Worker is not yet answering; a 200 (dispatched)
+          # or 502 (dispatch failed) ends the loop, so at most one dispatch.
+          for i in $(seq 1 36); do
+            code=$(curl -s -o "$RUNNER_TEMP/invoke.json" -w '%{http_code}' -X POST \
+                   -H "Authorization: Bearer $TEST_KEY" "$URL/__test-dispatch" || echo 000)
+            echo "attempt $i: HTTP $code"
+            case "$code" in 200|502) break ;; esac
+            sleep 5
+          done
+          echo "--- Worker response"
+          cat "$RUNNER_TEMP/invoke.json"; echo
+          [ "$code" = 200 ] || { echo "::error::deployed Worker did not dispatch (HTTP $code)"; exit 1; }
+          python3 -c "import json,sys; d=json.load(open(sys.argv[1])); assert d['ok'] and d['kind']=='test' and d['workflow']=='cloudflare-dispatch-probe.yml', d; print('GitHub run id:', d.get('workflow_run_id'))" "$RUNNER_TEMP/invoke.json"
+
+      - name: Rotate the test key away and prove the old one is dead
+        if: always() && inputs.action == 'deploy-and-test' && steps.deploy.outputs.url != ''
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          URL: ${{ steps.deploy.outputs.url }}
+        run: |
+          set -uo pipefail
+          new=$(openssl rand -hex 32)
+          echo "::add-mask::$new"
+          printf '%s' "$new" | npx wrangler secret put TEST_TRIGGER_KEY
+          unset new
+          for i in $(seq 1 24); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' -X POST -H "Authorization: Bearer $TEST_KEY" "$URL/__test-auth")
+            echo "old key -> HTTP $code"
+            [ "$code" = 401 ] && exit 0
+            sleep 5
+          done
+          echo "::error::old test key still accepted"; exit 1
+
+      - name: Remove local secret files
+        if: always()
+        working-directory: .
+        run: rm -f "$RUNNER_TEMP/worker.secrets.json" cloudflare/dispatcher/.dev.vars
