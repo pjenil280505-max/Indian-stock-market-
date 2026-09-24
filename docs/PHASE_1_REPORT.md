@@ -364,3 +364,90 @@ stable universe produced **1** interval row, not 60.
 weekend gaps, same-date re-runs, delist-and-relist, series change, absence during a gap,
 previous-observation tracking, storage scaling with changes rather than days, and the
 range constraint.
+
+---
+
+# Addendum D — Same-day reporting and schedule timing (2026-09-24)
+
+**Status: fixed and deployed.** The report now covers the session that just closed.
+
+## D.1 The cron was not the problem
+
+The request was to move the schedule earlier so the daily report lands on time. It would
+not have worked. `outstanding_dates()` ended its window at `today - 1`:
+
+```python
+end = today - timedelta(days=1)   # today deliberately excluded
+```
+
+So the 18:30 IST run loaded data through **yesterday**. The system was structurally one
+session behind, and no cron time changes that. The original reasoning — "a run fetching the
+current day would race publication" — was sound but solved the wrong problem: it traded a
+manageable timing risk for a permanent one-day lag.
+
+## D.2 What changed
+
+**1. The current trading day is now attempted.** `end = today`.
+
+**2. A missing archive file is classified, not assumed.** Previously any 404 was recorded as
+`no_data`, and `no_data` settles forever. Attempting the current day would therefore have
+marked every not-yet-published trading session as a permanent market holiday — silently
+losing it, because settled dates are never re-fetched. Now:
+
+| Condition | Status | Behaviour |
+|---|---|---|
+| 404, within 3 days | `failed` | retried next run |
+| 404, older than 3 days | `no_data` | genuine holiday, learned once |
+
+**3. Partial loads are revisited.** NSE publishes the bhavcopy well before
+`sec_bhavdata_full`, so an early run can capture prices but no `DELIV_PER`. Those bars are
+now stored and the date marked `partial`, which does not settle; a later run enriches them.
+The upsert already `COALESCE`s the delivery columns, so nothing is lost either way. Beyond
+the grace window a partial day is accepted as final rather than retrying forever.
+
+`partial` required widening the `ingestion_log` status constraint. `CREATE TABLE IF NOT
+EXISTS` leaves existing constraints alone, so `schema.sql` now carries an idempotent
+`DROP CONSTRAINT IF EXISTS` / `ADD CONSTRAINT` pair that upgrades databases in place.
+
+## D.3 The schedule
+
+| | Old | New |
+|---|---|---|
+| Fires per day | 1 | 2 |
+| First | `0 13 * * 1-5` — 18:30 IST | `41 11 * * 1-5` — **17:11 IST** |
+| Second | — | `17 14 * * 1-5` — 19:47 IST |
+| On the hour? | **yes** | no |
+
+The first fire is 101 minutes after the 15:30 IST close, by which point the bhavcopy is
+normally published. The second is a safety net at 257 minutes, by which point
+`sec_bhavdata_full` reliably is — and it also covers a missed or heavily delayed first fire.
+Both runs are idempotent, so the second costs nothing when the first succeeded.
+
+**Neither fires on the hour.** The previous schedule used minute 0 and was observed firing
+**4h 48m late** on 2026-09-23 (cron 13:00 UTC, actual 17:47:39 UTC). GitHub's own guidance
+is that the top of the hour is the worst minute to pick; the Phase 0 report said so and the
+original schedule then ignored it.
+
+## D.4 Verified against live data
+
+| Case | Result |
+|---|---|
+| Run dated 2026-09-23, a real trading day | **loaded 2,578 bars for 2026-09-23 itself** — the date the old code skipped |
+| Run dated 2026-09-24 at 09:46 IST, before the close | **`dates_pending_publication=['2026-09-24']`**, `ingestion_log` status `failed` — retryable |
+| Same run, holiday misclassification | `dates_no_data=[]` — today was **not** recorded as a holiday |
+| Integrity | `findings=0 (errors=0)`, `halted=False` |
+
+The second case is the one that matters: under the previous logic, attempting the current
+day before publication would have settled it as `no_data` and lost that session permanently.
+
+## D.5 Tests
+
+196 pass, including a new suite covering same-day inclusion, the grace-window boundary in
+both directions, delivery-completeness classification, retry-then-load once NSE publishes,
+and the cron schedule itself — that neither fire is on the hour, both are after the close,
+and the two are far enough apart for the safety net to enrich a partial load.
+
+Three pre-existing tests asserted the old behaviour and were rewritten. One is worth noting:
+`test_rerun_is_idempotent` compared total fetch counts, which conflated "a loaded date was
+re-fetched" with "a pending date was legitimately retried". It now asserts on the loaded
+date specifically, which is what idempotency actually means here.

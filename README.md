@@ -110,7 +110,7 @@ Running unattended in GitHub Actions against Neon (PostgreSQL 18.6):
 | Trading dates settled | 799, **0 failed**, **0 integrity findings** |
 | Database | **339.8 MB / 0.5 GB free tier**, 160 MB headroom |
 | Backfill runtime | 13 min 43 s |
-| Schedule | `0 13 * * 1-5` = **18:30 IST**, Mon–Fri |
+| Schedule | `41 11` + `17 14` UTC = **17:11 and 19:47 IST**, Mon–Fri |
 
 Idempotency verified in the cloud: a second identical daily run wrote **0 rows**, and
 re-running the completed backfill left the row count and database size unchanged.

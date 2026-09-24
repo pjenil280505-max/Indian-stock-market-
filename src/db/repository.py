@@ -328,7 +328,9 @@ class Repository:
     def settled_dates(self, source: str) -> set[date]:
         """Dates needing no further work: loaded, or known non-trading days.
 
-        'failed' is deliberately excluded so a failure is retried next run.
+        'failed' and 'partial' are deliberately excluded, so a failure is
+        retried and a partially-loaded day is revisited to pick up delivery
+        data once NSE publishes it.
         """
         with self.conn.cursor() as cur:
             cur.execute(

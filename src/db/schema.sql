@@ -135,8 +135,11 @@ CREATE TABLE IF NOT EXISTS ingestion_runs (
 -- One row per (source, data_date). The pipeline consults this to decide what
 -- still needs loading, so a re-run does no duplicate work and a missed day is
 -- caught up automatically.
---   status 'loaded'   data present and stored
---   status 'no_data'  not a trading day (archive returned 404)
+--   status 'loaded'   data present and complete
+--   status 'partial'  bars stored but delivery data not published yet;
+--                     retried so a later run can enrich them
+--   status 'no_data'  not a trading day (archive returned 404 beyond the
+--                     publication grace window)
 --   status 'failed'   attempted and failed; will be retried next run
 CREATE TABLE IF NOT EXISTS ingestion_log (
     source      TEXT NOT NULL,
@@ -146,7 +149,8 @@ CREATE TABLE IF NOT EXISTS ingestion_log (
     run_id      BIGINT REFERENCES ingestion_runs (run_id),
     updated_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
     PRIMARY KEY (source, data_date),
-    CONSTRAINT ingestion_log_status CHECK (status IN ('loaded', 'no_data', 'failed'))
+    CONSTRAINT ingestion_log_status
+        CHECK (status IN ('loaded', 'partial', 'no_data', 'failed'))
 );
 
 CREATE TABLE IF NOT EXISTS integrity_findings (
@@ -161,3 +165,11 @@ CREATE TABLE IF NOT EXISTS integrity_findings (
     CONSTRAINT integrity_severity CHECK (severity IN ('info', 'warning', 'error'))
 );
 CREATE INDEX IF NOT EXISTS integrity_findings_run_idx ON integrity_findings (run_id);
+
+
+-- Idempotent upgrades for databases created by an earlier schema version.
+-- CREATE TABLE IF NOT EXISTS leaves existing constraints alone, so widening
+-- one has to be done explicitly.
+ALTER TABLE ingestion_log DROP CONSTRAINT IF EXISTS ingestion_log_status;
+ALTER TABLE ingestion_log ADD CONSTRAINT ingestion_log_status
+    CHECK (status IN ('loaded', 'partial', 'no_data', 'failed'));

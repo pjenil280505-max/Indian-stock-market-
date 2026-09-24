@@ -117,7 +117,7 @@ class FakeNse:
     name = "nse"
 
     def __init__(self, bars_by_date=None, universe=None, fail_dates=(), actions=()):
-        self.bars_by_date = bars_by_date or {}
+        self.bars_by_date = dict(bars_by_date or {})
         self.universe = universe or [FakeUniverseRow("A", "INE0A"), FakeUniverseRow("B", "INE0B")]
         self.fail_dates = set(fail_dates)
         self.actions = list(actions)
@@ -147,11 +147,15 @@ class TestOutstandingDates:
         assert date(2026, 9, 21) in pending
         assert date(2026, 9, 19) not in pending, "Saturday must be excluded"
 
-    def test_excludes_today(self):
-        """The archive is published after the close; fetching today races it."""
+    def test_includes_today(self):
+        """The evening run must report the session that just closed.
+
+        Stopping at yesterday made the whole system structurally one day
+        behind. Racing publication is handled by the grace window instead.
+        """
         repo = FakeRepo()
         pending = outstanding_dates(repo, NSE_SOURCE, date(2026, 9, 22), catchup_days=5)
-        assert date(2026, 9, 22) not in pending
+        assert date(2026, 9, 22) in pending
 
     def test_excludes_already_settled_dates(self):
         repo = FakeRepo({NSE_SOURCE: {date(2026, 9, 21)}})
@@ -184,27 +188,49 @@ class TestPipelineRun:
         assert summary.universe_symbols == 2
         assert repo.universe[date(2026, 9, 22)] == ["INE0A", "INE0B"]
 
-    def test_rerun_is_idempotent(self):
-        """A second run on the same day must do no duplicate work."""
-        d = date(2026, 9, 21)
+    def test_loaded_dates_are_never_refetched(self):
+        """Idempotency for settled data. A date that is still awaiting
+        publication is legitimately retried, so assert on the loaded date
+        specifically rather than on the total fetch count."""
+        loaded, today = date(2026, 9, 21), date(2026, 9, 22)
         repo = FakeRepo()
-        nse = FakeNse({d: bars_for(d)})
+        nse = FakeNse({loaded: bars_for(loaded)})
         pipeline = DailyPipeline(repo, nse=nse)
-        pipeline.run(today=date(2026, 9, 22), catchup_days=3)
-        first_fetches = len(nse.fetched)
-        second = pipeline.run(today=date(2026, 9, 22), catchup_days=3)
-        assert second.dates_loaded == []
-        assert len(nse.fetched) == first_fetches, "settled dates must not be refetched"
+        pipeline.run(today=today, catchup_days=3)
+        second = pipeline.run(today=today, catchup_days=3)
 
-    def test_holiday_is_recorded_as_no_data_and_not_refetched(self):
+        assert second.dates_loaded == []
+        assert second.raw_bars_written == 0
+        assert nse.fetched.count(loaded) == 1, "a loaded date must not be refetched"
+
+    def test_unpublished_today_is_retried_not_settled(self):
+        """The expensive mistake would be settling today as a holiday."""
+        today = date(2026, 9, 22)
+        repo = FakeRepo()
+        nse = FakeNse({})  # nothing published yet
+        pipeline = DailyPipeline(repo, nse=nse)
+        first = pipeline.run(today=today, catchup_days=1)
+        assert today in first.dates_pending
+        assert today not in first.dates_no_data
+
+        nse.bars_by_date[today] = bars_for(today)   # NSE publishes
+        second = pipeline.run(today=today, catchup_days=1)
+        assert today in second.dates_loaded
+
+    def test_old_holiday_is_recorded_as_no_data_and_not_refetched(self):
+        """Beyond the publication grace window a missing file really is a
+        non-trading day, and is learned once."""
+        today = date(2026, 9, 22)
         repo = FakeRepo()
         nse = FakeNse({})  # every date returns None
         pipeline = DailyPipeline(repo, nse=nse)
-        first = pipeline.run(today=date(2026, 9, 22), catchup_days=3)
-        assert first.dates_no_data
-        count = len(nse.fetched)
-        pipeline.run(today=date(2026, 9, 22), catchup_days=3)
-        assert len(nse.fetched) == count, "holidays must be learned once"
+        first = pipeline.run(today=today, catchup_days=30)
+        assert first.dates_no_data, "old dates must settle as holidays"
+        old = first.dates_no_data[0]
+        assert (today - old).days > 3
+        count = nse.fetched.count(old)
+        pipeline.run(today=today, catchup_days=30)
+        assert nse.fetched.count(old) == count, "holidays must be learned once"
 
     def test_failed_date_is_retried_on_the_next_run(self):
         d = date(2026, 9, 21)

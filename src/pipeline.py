@@ -19,6 +19,7 @@ from dataclasses import dataclass, field
 from datetime import date, timedelta
 
 from . import integrity
+from .config import PUBLICATION_GRACE_DAYS
 from .sources.nse import NseSource
 from .sources.upstox import UpstoxSource
 
@@ -41,6 +42,8 @@ class RunSummary:
     dates_loaded: list[date] = field(default_factory=list)
     dates_no_data: list[date] = field(default_factory=list)
     dates_failed: list[date] = field(default_factory=list)
+    dates_pending: list[date] = field(default_factory=list)
+    dates_partial: list[date] = field(default_factory=list)
     raw_bars_written: int = 0
     adjusted_bars_written: int = 0
     corporate_actions_written: int = 0
@@ -59,6 +62,8 @@ class RunSummary:
             f"dates_loaded={[d.isoformat() for d in self.dates_loaded]}",
             f"dates_no_data={[d.isoformat() for d in self.dates_no_data]}",
             f"dates_failed={[d.isoformat() for d in self.dates_failed]}",
+            f"dates_pending_publication={[d.isoformat() for d in self.dates_pending]}",
+            f"dates_partial_no_delivery={[d.isoformat() for d in self.dates_partial]}",
             f"raw_bars_written={self.raw_bars_written}",
             f"adjusted_bars_written={self.adjusted_bars_written}",
             f"corporate_actions={self.corporate_actions_written}",
@@ -70,18 +75,56 @@ class RunSummary:
 
 
 def outstanding_dates(
-    repo, source: str, today: date, catchup_days: int = DEFAULT_CATCHUP_DAYS
+    repo,
+    source: str,
+    today: date,
+    catchup_days: int = DEFAULT_CATCHUP_DAYS,
+    *,
+    include_today: bool = True,
 ) -> list[date]:
     """Weekdays in the catch-up window that have not settled yet.
 
-    Today is excluded: the archive is published after the close, and a run
-    fetching the current day would race publication.
+    The current trading day IS included. An earlier version stopped at
+    yesterday to avoid racing publication, which made the whole system
+    structurally one day behind - the evening run reported the previous
+    session, never the one that had just closed. Racing publication is the
+    lesser problem, and it is handled: a missing file within the publication
+    grace window is retried rather than recorded as a holiday.
     """
     start = today - timedelta(days=catchup_days)
-    end = today - timedelta(days=1)
+    end = today if include_today else today - timedelta(days=1)
     expected = set(integrity.candidate_dates(start, end))
     settled = repo.settled_dates(source)
     return integrity.missing_trading_dates(expected, settled)
+
+
+def classify_missing(trade_date: date, today: date,
+                     grace_days: int = PUBLICATION_GRACE_DAYS) -> str:
+    """A 404 from the archive: not published yet, or a market holiday?
+
+    Getting this wrong in the permanent direction is the expensive error. A
+    trading day wrongly recorded as 'no_data' settles forever and is never
+    re-fetched, so a recent miss stays retryable.
+    """
+    return "failed" if (today - trade_date).days <= grace_days else "no_data"
+
+
+def classify_loaded(bars, trade_date: date, today: date,
+                    grace_days: int = PUBLICATION_GRACE_DAYS) -> str:
+    """Complete, or bars without delivery data that should be revisited?
+
+    NSE publishes the bhavcopy well before sec_bhavdata_full, so an early run
+    can capture prices but no DELIV_PER. The bars are worth keeping either
+    way - the upsert COALESCEs delivery columns, so a later run enriches them
+    without losing anything - but the date must not settle yet.
+    """
+    if any(getattr(bar, "deliv_pct", None) is not None for bar in bars):
+        return "loaded"
+    if (today - trade_date).days <= grace_days:
+        return "partial"
+    # Beyond the grace window, accept what exists: some dates never get
+    # delivery data, and retrying forever would be a permanent open item.
+    return "loaded"
 
 
 class DailyPipeline:
@@ -156,9 +199,13 @@ class DailyPipeline:
                 continue
 
             if bars is None:
-                # Archive 404: a market holiday. Learn it once.
-                self.repo.mark_ingestion(NSE_SOURCE, trade_date, "no_data", 0, summary.run_id)
-                summary.dates_no_data.append(trade_date)
+                status = classify_missing(trade_date, today)
+                self.repo.mark_ingestion(NSE_SOURCE, trade_date, status, 0, summary.run_id)
+                if status == "no_data":
+                    summary.dates_no_data.append(trade_date)
+                else:
+                    log.info("%s not published yet; will retry", trade_date)
+                    summary.dates_pending.append(trade_date)
                 continue
 
             findings = integrity.validate_batch(bars, trade_date)
@@ -170,9 +217,15 @@ class DailyPipeline:
 
             written = self.repo.upsert_raw_bars(bars, ticker_ids, self.nse.name)
             summary.raw_bars_written += written
-            self.repo.mark_ingestion(NSE_SOURCE, trade_date, "loaded", written, summary.run_id)
+            status = classify_loaded(bars, trade_date, today)
+            self.repo.mark_ingestion(NSE_SOURCE, trade_date, status, written, summary.run_id)
             summary.dates_loaded.append(trade_date)
-            log.info("loaded %d raw bars for %s", written, trade_date)
+            if status == "partial":
+                summary.dates_partial.append(trade_date)
+                log.info("loaded %d bars for %s WITHOUT delivery data; will revisit",
+                         written, trade_date)
+            else:
+                log.info("loaded %d raw bars for %s", written, trade_date)
 
     def _update_corporate_actions(self, symbol_ids, summary: RunSummary) -> None:
         actions = self.nse.fetch_corporate_actions()

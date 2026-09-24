@@ -40,6 +40,20 @@ UPSTOX_MIN_INTERVAL_SECONDS = 0.25
 # Upstox rejects a >5 year window for days/1 with UDAPI1148 (Phase 0 check 11).
 UPSTOX_MAX_WINDOW_DAYS = 1800
 
+# How recently a date must fall for a missing archive file to mean "not
+# published yet" rather than "market holiday".
+#
+# This matters because the pipeline now attempts the CURRENT trading day. NSE
+# publishes the bhavcopy within an hour or so of the close but the delivery
+# file (sec_bhavdata_full) lands later, so an early run can legitimately find
+# nothing. Marking that as a holiday would silently and permanently lose a
+# trading day - the archive is never revisited once a date settles.
+PUBLICATION_GRACE_DAYS = 3
+
+# Minutes after the 15:30 IST close before the current day is worth attempting.
+IST_CLOSE_MINUTES = 15 * 60 + 30
+SAME_DAY_ATTEMPT_AFTER_MINUTES = 60
+
 
 @dataclass(frozen=True)
 class Settings:
