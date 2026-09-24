@@ -451,3 +451,73 @@ Three pre-existing tests asserted the old behaviour and were rewritten. One is w
 `test_rerun_is_idempotent` compared total fetch counts, which conflated "a loaded date was
 re-fetched" with "a pending date was legitimately retried". It now asserts on the loaded
 date specifically, which is what idempotency actually means here.
+
+---
+
+# Addendum E — Measured NSE publication lag and scheduling reliability (2026-09-24)
+
+Two numbers were measured rather than assumed: when NSE actually publishes, and whether
+GitHub actually fires the schedule on time. The first came out fine. The second did not.
+
+## E.1 NSE publication lag, measured by polling
+
+Probed both archive paths every 5 minutes from 20 minutes after the 15:30 IST close,
+retrying 403s (throttling) inside each sample so a throttle did not waste a slot.
+
+```
+10:21:30  bhavcopy=404  delivery=403     21 min after close
+10:56:19  bhavcopy=404  delivery=404     last confirmed miss for prices
+11:06:15  bhavcopy=200  delivery=403     PRICES LIVE
+11:26:56  bhavcopy=200  delivery=404     delivery still missing at 87 min
+11:31:48                delivery=200     DELIVERY LIVE
+```
+
+| File | Published after close | IST |
+|---|---|---|
+| Bhavcopy (prices) | **56–66 min** | ~16:31 |
+| `sec_bhavdata_full` (delivery) | **87–92 min** | ~17:02–17:07 |
+
+Delivery lands roughly **26 minutes after** prices. That gap is the entire justification for
+the `partial` status added in Addendum D: a run between the two captures prices with no
+`DELIV_PER`.
+
+**Verdict on the 17:11 IST first fire:** it clears delivery publication by only **9–14
+minutes**. That is the earliest defensible time — anything earlier systematically produces
+`partial` days — but it is a thin margin measured on a single session, and publication
+timing varies with settlement load, expiry and month-end. Slow days will produce `partial`,
+which the 19:47 IST run then enriches. No data is at risk; only timeliness wobbles.
+
+A prediction made before the measurement completed — that the 11:41 UTC run would come back
+`partial` — was **wrong**. Delivery published 9 minutes before the fire. It was called from
+an incomplete poll.
+
+## E.2 Scheduled triggers are not reliable on this account
+
+| Date | Cron | Actual fire | Schedule | Repo | Delay |
+|---|---|---|---|---|---|
+| 2026-09-23 | 13:00 UTC | 17:47:39 UTC | minute 0 | private | **288 min (4h 48m)** |
+| 2026-09-24 | 11:41 UTC | had not fired by 13:06 UTC | minute 41 | public | **85+ min, pending** |
+
+Manual `workflow_dispatch` runs on the same repository, same workflow, same runner pool
+start in **2–3 seconds**, consistently. So the workflow, the secret, the runners and the
+account are all fine. The `schedule` event itself is what arrives late.
+
+**This contradicts the fix made in Addendum D.** Moving off the top of the hour was
+predicted to cut the delay, on the basis of GitHub's documented guidance. Two observations
+do not support that: the off-hour schedule is also badly late, and going public did not help
+either. The change was not harmful — off-hour timing is still better practice, and the
+second daily fire is genuinely useful — but it did not solve the problem it was made for,
+and the Addendum D reasoning should be read with that correction.
+
+**What this does and does not threaten.** Nothing about data integrity: the pipeline is
+idempotent, computes outstanding dates from `ingestion_log`, and catches up whenever it
+runs. A late fire costs timeliness only. What it does mean is that **"the report lands at
+17:11 IST" is not achievable through `schedule` alone**, and no cron expression will make it
+so.
+
+If punctual delivery becomes a requirement, the only reliable mechanism observed here is
+`workflow_dispatch`, which starts within seconds. That needs an external nudge — a trigger
+outside GitHub calling the API on time — which reintroduces the always-on component Phase 0
+deliberately removed. That trade belongs to a later phase and should be decided explicitly,
+not slipped in. For now the honest position is that the daily job runs every weekday and
+lands *eventually*, usually within a few hours of the intended time.
