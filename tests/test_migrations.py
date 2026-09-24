@@ -291,3 +291,22 @@ class TestFingerprint:
         after = data_fingerprint(conn)
         assert after["daily_bars_raw"][0] == before["daily_bars_raw"][0]  # same count
         assert after["daily_bars_raw"] != before["daily_bars_raw"]  # digest moved
+
+
+class TestMigrateStatusCli:
+    def test_status_prints_fingerprint_and_changes_nothing(self, conn, monkeypatch, capsys):
+        apply_pending(conn)
+        _seed(Repository(conn))
+        catalog, data = _catalog_snapshot(conn), data_fingerprint(conn)
+        monkeypatch.setenv("DATABASE_URL", TEST_DB)
+        monkeypatch.setattr("sys.argv", ["migrate.py", "status"])
+        spec = importlib.util.spec_from_file_location("migrate_cli", ROOT / "scripts" / "migrate.py")
+        cli = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cli)
+
+        assert cli.main() == 0
+
+        out = capsys.readouterr().out
+        assert "daily_bars_raw" in out and "digest=" in out
+        assert _catalog_snapshot(conn) == catalog
+        assert data_fingerprint(conn) == data

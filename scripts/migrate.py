@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Run or inspect versioned schema migrations.
 
-    python3 scripts/migrate.py status   # read-only: list applied/pending
+    python3 scripts/migrate.py status   # read-only: applied/pending + data fingerprint
     python3 scripts/migrate.py apply    # apply pending, proving data unchanged
 
 `apply` fingerprints the protected tables (daily_bars_raw, universe_membership,
@@ -57,6 +57,9 @@ def main() -> int:
             done = applied(conn)
             outstanding = pending(conn, migrations)
             conn.rollback()
+            # Same fingerprint `apply` prints, over a read-only connection, so
+            # data preservation can be checked before/after any operation.
+            show_fingerprint("protected data", data_fingerprint(conn))
         except MigrationError as exc:
             print(f"FAIL: {exc}")
             return 3
