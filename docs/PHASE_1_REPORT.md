@@ -521,3 +521,51 @@ outside GitHub calling the API on time — which reintroduces the always-on comp
 deliberately removed. That trade belongs to a later phase and should be decided explicitly,
 not slipped in. For now the honest position is that the daily job runs every weekday and
 lands *eventually*, usually within a few hours of the intended time.
+
+## E.3 Follow-up: neither fire arrived on 2026-09-24
+
+Checked again at **14:41 UTC**, after both scheduled fires were due:
+
+| Intended fire | Overdue by | Fired? |
+|---|---|---|
+| 11:41 UTC (17:11 IST) | **180 min** | no |
+| 14:17 UTC (19:47 IST) | **24 min** | no |
+
+`event=schedule` still returns exactly one run for this workflow — yesterday's failed
+2026-09-23 fire. **Zero scheduled runs occurred on 2026-09-24.**
+
+**Operational consequence.** The last daily run was the manual `workflow_dispatch` at
+04:16 UTC, which correctly recorded 2026-09-24 as pending publication (the market had not
+closed). NSE published prices at 11:06 UTC and delivery data at 11:31 UTC. Both scheduled
+fires that would have ingested them did not run. **So 2026-09-24 is published upstream but
+absent from Neon: the system did not update itself today.**
+
+This is exactly the failure the whole exercise was meant to detect, and it is worth being
+precise about what it does and does not prove.
+
+**It does not prove the fires were skipped.** Yesterday's fire eventually arrived 4h 48m
+late, at 17:47 UTC. By that precedent today's 11:41 fire could still land around 16:30 UTC.
+Checking stopped at 14:41 UTC, so "did not fire within 3 hours" is established; "was
+skipped entirely" is not.
+
+**It does prove the pipeline cannot be relied on for same-day delivery via `schedule`.**
+Across the only two days of evidence: one fire 4h 48m late, two fires not arrived after
+3h and 24m. Manual `workflow_dispatch` on the same repository starts in 2–3 seconds every
+time.
+
+**Revised recommendation.** The earlier wording — that the job "lands eventually, usually
+within a few hours" — is too generous for the evidence. The accurate statement is that
+scheduled delivery is **best-effort with no useful upper bound**, and that same-day data
+currently requires a manual trigger (GitHub mobile app → Actions → Run workflow, which
+takes seconds and is idempotent).
+
+Data integrity remains unaffected throughout: nothing was lost, 2026-09-24 sits as a
+retryable pending date, and whenever a run next happens — scheduled or manual — it will be
+picked up automatically. The defect is in delivery timing, not in the data.
+
+**What would actually fix it** is an external trigger calling `workflow_dispatch` on
+schedule. That reintroduces the always-on component Phase 0 removed, so it is a genuine
+architectural trade and is left for explicit decision rather than made here. A cheap
+middle option worth considering first: keep the crons as a free best-effort path and treat
+the manual trigger as the reliable one until several more days of evidence either confirm
+or contradict this pattern.
