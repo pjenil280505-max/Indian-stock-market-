@@ -388,7 +388,10 @@ check 10) and will not fit a free tier at universe scale. When intraday research
 (a) store minute bars only for a small watchlist, or (b) keep them as compressed Parquet in
 object storage and load on demand. Do not silently start writing minute bars to the primary DB.
 
-**Cost if exceeded:** Neon paid tiers start around **$19/month (~₹1,600)**. Alternatives:
+**Cost if exceeded:** Neon's paid Launch plan is usage-based with **no monthly minimum**;
+at this project's size the estimate is a few dollars a month (~₹100–₹450). *(Corrected in
+Phase 1a; this originally said "$19/month (~₹1,600)". See PHASE_1_REPORT Addendum F.5.)*
+Alternatives:
 Supabase Pro ~$25/mo, or Parquet-in-object-storage at near-zero cost for cold history. The
 architecture should keep bar storage behind a repository interface so this swap is contained.
 
@@ -633,13 +636,17 @@ so early reports are market summaries with an explicit "no validated detectors e
 | Component | Phase 1–3 | If free tiers outgrown |
 |---|---|---|
 | Compute (GitHub Actions) | **₹0** (~210 of 2,000 min) | Cloud Run ~₹80 |
-| Database (Neon) | **₹0** (~0.29 of 0.5 GB) | Neon paid ~$19 ≈ ₹1,600 |
+| Database (Neon) | **₹0** (~0.29 of 0.5 GB) | Neon usage-based, est. ~₹100–₹450 (corrected, see note) |
 | Market data (NSE archives) | **₹0** | ₹0 — official, no tier |
 | Adjusted history (Upstox) | **₹0** | Angel One/Dhan ₹0, or Kite Connect ₹500 |
 | Telegram | **₹0** | ₹0 |
 | Android control | **₹0** | ₹0 |
 | AI API | **₹0** (excluded) | Usage-based, optional |
-| **Total** | **₹0 / month** | **₹1,600–₹2,200 / month worst case** |
+| **Total** | **₹0 / month** | **≈ ₹100–₹1,050 / month worst case** (corrected, see note) |
+
+*Note (Phase 1a correction): this table originally priced Neon at ~$19 ≈ ₹1,600/month and
+the worst case at ₹1,600–₹2,200/month. Neon's paid plan has no monthly minimum and is
+billed on usage; see PHASE_1_REPORT Addendum F.5. Figures are estimates, not quotes.*
 
 **Nothing was purchased. No account was created. No deployment was made.**
 

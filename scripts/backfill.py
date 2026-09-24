@@ -24,7 +24,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from src import integrity  # noqa: E402
 from src.config import load_settings  # noqa: E402
-from src.db.repository import Repository, apply_schema, connect  # noqa: E402
+from src.db.migrate import require_current_schema  # noqa: E402
+from src.db.repository import Repository, connect  # noqa: E402
 from src.pipeline import NSE_SOURCE  # noqa: E402
 from src.sources.nse import NseSource  # noqa: E402
 from src.sources.upstox import UpstoxSource  # noqa: E402
@@ -175,7 +176,7 @@ def main() -> int:
     )
 
     with connect(settings.database_url) as conn:
-        apply_schema(conn)
+        require_current_schema(conn)  # read-only; this job never runs DDL
         repo = Repository(conn)
         run_id = repo.start_run(settings.commit_sha)
         budget = Budget(args.max_minutes, repo, args.stop_at_mb * 1e6 if args.stop_at_mb else 0)

@@ -10,7 +10,8 @@ from datetime import date
 
 import pytest
 
-from src.db.repository import Repository, apply_schema, connect
+from src.db.migrate import apply_pending
+from src.db.repository import Repository, connect
 
 TEST_DB = os.environ.get("TEST_DATABASE_URL")
 pytestmark = pytest.mark.skipif(not TEST_DB, reason="TEST_DATABASE_URL not set")
@@ -76,18 +77,18 @@ def repo():
             "DROP TABLE IF EXISTS integrity_findings, adjustment_factors,"
             " corporate_actions, daily_bars_adjusted, daily_bars_raw,"
             " universe_snapshots, universe_membership, ingestion_log,"
-            " ingestion_runs, symbols CASCADE"
+            " ingestion_runs, symbols, schema_migrations CASCADE"
         )
     conn.commit()
-    apply_schema(conn)
+    apply_pending(conn)
     yield Repository(conn)
     conn.close()
 
 
 class TestSchema:
-    def test_schema_applies_cleanly_twice(self, repo):
-        """apply_schema runs on every start, so it must be re-runnable."""
-        apply_schema(repo.conn)
+    def test_migrations_are_idempotent(self, repo):
+        """A second apply finds nothing pending and changes nothing."""
+        assert apply_pending(repo.conn) == []
         assert repo.counts()["symbols"] == 0
 
 

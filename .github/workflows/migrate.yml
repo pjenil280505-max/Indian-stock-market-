@@ -1,0 +1,48 @@
+name: Database migrations
+
+# The ONLY place schema changes are applied. Normal jobs (daily update,
+# backfill, connection check) never run DDL; they refuse to start while a
+# migration is pending.
+#
+#   status - read-only: lists applied and pending migrations. Exits non-zero
+#            when something is pending, so a red run means "apply needed".
+#   apply  - applies pending migrations, each in its own transaction, and
+#            fingerprints daily_bars_raw, universe_membership and symbols
+#            before and after. Fails if any of them changed.
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'status (read-only) or apply'
+        required: true
+        type: choice
+        options: [status, apply]
+        default: status
+
+concurrency:
+  # Shares the writer lock with the daily update and the backfill, so a
+  # migration never runs while data is being written.
+  group: database-writer
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  migrate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Migrate (${{ inputs.mode }})
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: python3 scripts/migrate.py "${{ inputs.mode }}"

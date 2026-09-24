@@ -9,26 +9,63 @@ from __future__ import annotations
 
 import logging
 from datetime import date
-from pathlib import Path
 
 log = logging.getLogger(__name__)
 
-SCHEMA_PATH = Path(__file__).with_name("schema.sql")
 
 
-def connect(database_url: str):
+def connect(database_url: str, *, read_only: bool = False):
     """Open a psycopg connection. Imported lazily so the package imports
-    without a driver present (offline tests never touch the database)."""
+    without a driver present (offline tests never touch the database).
+
+    read_only=True makes every transaction on the connection READ ONLY at the
+    server, so any accidental write or DDL fails instead of taking effect.
+    """
     import psycopg
 
-    return psycopg.connect(database_url)
+    conn = psycopg.connect(database_url)
+    if read_only:
+        conn.read_only = True
+    return conn
 
 
-def apply_schema(conn) -> None:
-    """Create tables if absent. Safe to run on every start."""
+# Tables whose contents must survive schema work unchanged. Each fingerprint
+# query is read-only and aggregates cheaply: counts, bounds, and a sum of
+# per-row hashes, which moves if any row is added, removed or edited.
+_FINGERPRINT_QUERIES = {
+    "daily_bars_raw": """
+        SELECT count(*), min(trade_date), max(trade_date),
+               coalesce(sum(hashtext(symbol_id::text || '|' || trade_date::text || '|'
+                   || series || '|' || close::text || '|' || volume::text)::bigint), 0)
+          FROM daily_bars_raw
+    """,
+    "universe_membership": """
+        SELECT count(*), min(valid_from), max(valid_to),
+               coalesce(sum(hashtext(symbol_id::text || '|' || series || '|'
+                   || valid_from::text || '|' || valid_to::text)::bigint), 0)
+          FROM universe_membership
+    """,
+    "symbols": """
+        SELECT count(*), min(first_seen), max(last_seen),
+               coalesce(sum(hashtext(isin || '|' || symbol_id::text)::bigint), 0)
+          FROM symbols
+    """,
+}
+
+
+def data_fingerprint(conn) -> dict[str, tuple]:
+    """Read-only content fingerprint of the tables that must never change
+    during schema work. Compare before/after to prove preservation."""
+    out: dict[str, tuple] = {}
     with conn.cursor() as cur:
-        cur.execute(SCHEMA_PATH.read_text())
-    conn.commit()
+        for table, sql in _FINGERPRINT_QUERIES.items():
+            cur.execute("SELECT to_regclass(%s)", (table,))
+            if cur.fetchone()[0] is None:
+                continue
+            cur.execute(sql)
+            out[table] = tuple(cur.fetchone())
+    conn.rollback()
+    return out
 
 
 class Repository:

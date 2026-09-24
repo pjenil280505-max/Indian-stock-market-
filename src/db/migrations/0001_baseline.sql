@@ -1,3 +1,13 @@
+-- Migration 0001 - baseline.
+--
+-- The schema as it existed in production on 2026-09-24 (Neon, PostgreSQL
+-- 18.6). Every statement is CREATE ... IF NOT EXISTS, so applying this to the
+-- existing production database is a no-op: it records the starting point
+-- without touching any table or row.
+--
+-- Migrations run ONLY through scripts/migrate.py. Normal jobs never execute
+-- DDL; they check that the schema is current and stop if it is not.
+--
 -- Phase 1 schema. Data foundation only: no strategy, signal or backtest tables.
 --
 -- Design rules carried from docs/PHASE_0_REPORT.md:
@@ -165,11 +175,3 @@ CREATE TABLE IF NOT EXISTS integrity_findings (
     CONSTRAINT integrity_severity CHECK (severity IN ('info', 'warning', 'error'))
 );
 CREATE INDEX IF NOT EXISTS integrity_findings_run_idx ON integrity_findings (run_id);
-
-
--- Idempotent upgrades for databases created by an earlier schema version.
--- CREATE TABLE IF NOT EXISTS leaves existing constraints alone, so widening
--- one has to be done explicitly.
-ALTER TABLE ingestion_log DROP CONSTRAINT IF EXISTS ingestion_log_status;
-ALTER TABLE ingestion_log ADD CONSTRAINT ingestion_log_status
-    CHECK (status IN ('loaded', 'partial', 'no_data', 'failed'));

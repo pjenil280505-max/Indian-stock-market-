@@ -1,7 +1,9 @@
 """Daily data-update pipeline. Read-only with respect to the market.
 
-Resumability and idempotency, which the scheduler requires (report section 1.3
-- scheduled runs are delayed 15-30 min and can be skipped entirely):
+Resumability and idempotency, which the scheduler requires. GitHub scheduled
+runs are best-effort: on this repository they were measured firing 250-288
+minutes late (docs/PHASE_1_REPORT.md Addenda E and F), and GitHub documents
+that they can be dropped under load, so no single run can be relied on:
 
   * Every (source, date) outcome is recorded in ingestion_log.
   * A run computes outstanding dates from that log, so a missed day is caught

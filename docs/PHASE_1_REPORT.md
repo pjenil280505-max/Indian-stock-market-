@@ -253,7 +253,9 @@ Options, in order of cost:
    makes point-in-time reconstruction cheaper rather than harder.
 2. **Trim the stored universe for bars** — exclude perpetually illiquid symbols from daily
    bar storage. Reduces research scope, so it is a real trade.
-3. **Neon paid tier** — roughly $19/month. Not required yet.
+3. **Neon paid tier** — usage-based with no monthly minimum; estimated at a few dollars a
+   month at this project's size. Not required yet. *(Corrected in Phase 1a; this line
+   originally said "roughly $19/month". See Addendum F.5.)*
 
 ## B.6 Scheduled operation
 
@@ -409,6 +411,9 @@ the grace window a partial day is accepted as final rather than retrying forever
 EXISTS` leaves existing constraints alone, so `schema.sql` now carries an idempotent
 `DROP CONSTRAINT IF EXISTS` / `ADD CONSTRAINT` pair that upgrades databases in place.
 
+*Superseded in Phase 1a: this runtime ALTER was moved into the guarded migration
+`0002_ingestion_log_partial_status.sql` and `schema.sql` was retired (Addendum F.3).*
+
 ## D.3 The schedule
 
 | | Old | New |
@@ -493,10 +498,14 @@ an incomplete poll.
 
 ## E.2 Scheduled triggers are not reliable on this account
 
+*Table updated in Phase 1a with the measured fire times (see Addendum F). The original
+row for the 11:41 fire read "had not fired by 13:06 UTC, 85+ min, pending".*
+
 | Date | Cron | Actual fire | Schedule | Repo | Delay |
 |---|---|---|---|---|---|
 | 2026-09-23 | 13:00 UTC | 17:47:39 UTC | minute 0 | private | **288 min (4h 48m)** |
-| 2026-09-24 | 11:41 UTC | had not fired by 13:06 UTC | minute 41 | public | **85+ min, pending** |
+| 2026-09-24 | 11:41 UTC | 15:54:50 UTC | minute 41 | public | **253 min (4h 13m)** |
+| 2026-09-24 | 14:17 UTC | 18:27:03 UTC | minute 17 | public | **250 min (4h 10m)** |
 
 Manual `workflow_dispatch` runs on the same repository, same workflow, same runner pool
 start in **2–3 seconds**, consistently. So the workflow, the secret, the runners and the
@@ -522,50 +531,132 @@ deliberately removed. That trade belongs to a later phase and should be decided 
 not slipped in. For now the honest position is that the daily job runs every weekday and
 lands *eventually*, usually within a few hours of the intended time.
 
-## E.3 Follow-up: neither fire arrived on 2026-09-24
+## E.3 Follow-up: both fires arrived about 4 hours late on 2026-09-24
 
-Checked again at **14:41 UTC**, after both scheduled fires were due:
+*Corrected in Phase 1a (Addendum F). The original version of this section was headed
+"neither fire arrived", stated "zero scheduled runs occurred on 2026-09-24", and concluded
+that scheduled delivery had "no useful upper bound". The first two statements were false
+and the third was not supported by the evidence. The account below replaces it.*
 
-| Intended fire | Overdue by | Fired? |
-|---|---|---|
-| 11:41 UTC (17:11 IST) | **180 min** | no |
-| 14:17 UTC (19:47 IST) | **24 min** | no |
+**What was observed at the time.** At 14:41 UTC, after both fires were due, `event=schedule`
+returned only the previous day's run. That observation was accurate *at 14:41 UTC*; the
+error was reporting it as the day's outcome instead of waiting for the known 4–5 h delay.
 
-`event=schedule` still returns exactly one run for this workflow — yesterday's failed
-2026-09-23 fire. **Zero scheduled runs occurred on 2026-09-24.**
+**What actually happened** (GitHub Actions API, workflow `daily-data-update.yml`):
 
-**Operational consequence.** The last daily run was the manual `workflow_dispatch` at
-04:16 UTC, which correctly recorded 2026-09-24 as pending publication (the market had not
-closed). NSE published prices at 11:06 UTC and delivery data at 11:31 UTC. Both scheduled
-fires that would have ingested them did not run. **So 2026-09-24 is published upstream but
-absent from Neon: the system did not update itself today.**
+| Run | Event | Created (UTC) | Delay vs cron | Outcome |
+|---|---|---|---|---|
+| #7 | `workflow_dispatch` (manual fallback) | 15:44:51 | — | success; **loaded 2026-09-24, 2,577 raw bars** |
+| #8 | `schedule` (11:41 cron) | 15:54:50 | **253 min** | success; nothing outstanding (no-op) |
+| #9 | `schedule` (14:17 cron) | 18:27:03 | **250 min** | success; nothing outstanding (no-op) |
 
-This is exactly the failure the whole exercise was meant to detect, and it is worth being
-precise about what it does and does not prove.
+So both scheduled fires did arrive and ran successfully. 2026-09-24 was ingested by the
+manual fallback ten minutes before the first scheduled fire; had the fallback not been
+triggered, the 15:54 scheduled run would have ingested it.
 
-**It does not prove the fires were skipped.** Yesterday's fire eventually arrived 4h 48m
-late, at 17:47 UTC. By that precedent today's 11:41 fire could still land around 16:30 UTC.
-Checking stopped at 14:41 UTC, so "did not fire within 3 hours" is established; "was
-skipped entirely" is not.
+**Accurate conclusion.** Across three observed scheduled fires the delay was 288, 253 and
+250 minutes — consistently about four to five hours, with none skipped. That is *not* "no
+upper bound", but it is also far outside the intended 17:11 IST delivery: in practice the
+scheduled data lands around 21:25–22:15 IST. GitHub documents that scheduled runs can be
+delayed under load and that queued runs can be dropped, so three data points are not a
+guarantee either way.
 
-**It does prove the pipeline cannot be relied on for same-day delivery via `schedule`.**
-Across the only two days of evidence: one fire 4h 48m late, two fires not arrived after
-3h and 24m. Manual `workflow_dispatch` on the same repository starts in 2–3 seconds every
-time.
+**Unchanged by this correction:** data integrity. The pipeline is idempotent, computes
+outstanding dates from `ingestion_log`, and a late or missed run costs only timeliness.
+Same-day delivery at a fixed time still needs something other than `schedule` — a manual
+trigger, or an external caller of `workflow_dispatch` — which remains an explicit
+architecture decision for a later phase.
 
-**Revised recommendation.** The earlier wording — that the job "lands eventually, usually
-within a few hours" — is too generous for the evidence. The accurate statement is that
-scheduled delivery is **best-effort with no useful upper bound**, and that same-day data
-currently requires a manual trigger (GitHub mobile app → Actions → Run workflow, which
-takes seconds and is idempotent).
+---
 
-Data integrity remains unaffected throughout: nothing was lost, 2026-09-24 sits as a
-retryable pending date, and whenever a run next happens — scheduled or manual — it will be
-picked up automatically. The defect is in delivery timing, not in the data.
+# Addendum F — Phase 1a corrections and hardening (2026-09-24)
 
-**What would actually fix it** is an external trigger calling `workflow_dispatch` on
-schedule. That reintroduces the always-on component Phase 0 removed, so it is a genuine
-architectural trade and is left for explicit decision rather than made here. A cheap
-middle option worth considering first: keep the crons as a free best-effort path and treat
-the manual trigger as the reliable one until several more days of evidence either confirm
-or contradict this pattern.
+Phase 1a fixed defects found by the transformation audit. It added no features and changed
+no market data. Everything below is a correction of something this report or the code
+previously got wrong.
+
+## F.1 The daily job and the backfill were NOT mutually excluded
+
+Commit `ef4e5a1` stated that the backfill workflow shared "a database-writer concurrency
+group with the daily job so the two can never write concurrently". That was false: the
+backfill used `group: database-writer` but the daily job used `group: daily-data-update`.
+Different groups do not exclude each other, so a scheduled daily run could run during a
+backfill.
+
+**Fixed.** Every workflow that is given `DATABASE_URL` — daily update, backfill, and the new
+migrations workflow — now uses `group: database-writer` with `cancel-in-progress: false`.
+A test (`tests/test_phase1a_guards.py`) fails the build if any workflow with database access
+uses a different group.
+
+GitHub caveat, stated rather than hidden: a concurrency group holds at most one *pending*
+run. If a second run queues while one is already pending, the older pending run is
+cancelled (a *running* job is never cancelled). Every writer is idempotent and resumable,
+so this can delay work but cannot lose or corrupt data.
+
+## F.2 The connection check executed DDL
+
+`scripts/check_connection.py` was described as a preflight check but called
+`apply_schema()`, which ran `CREATE TABLE IF NOT EXISTS …` and an `ALTER TABLE … DROP/ADD
+CONSTRAINT` block on every run — including before every scheduled daily update.
+
+**Fixed.** The check now opens the connection with `read_only = True`, so PostgreSQL itself
+rejects any write or DDL in its transactions. It reports migration status and exits `4` if
+the schema is behind, instead of silently changing it. Tests verify both the static property
+(the script requests a read-only connection and never commits) and the behaviour (running it
+leaves the catalogue and all data unchanged, and on an unmigrated database it reports
+`BEHIND` without creating anything).
+
+## F.3 Schema changes moved out of normal jobs into versioned migrations
+
+Previously `src/db/schema.sql` was re-executed at the start of every daily run, backfill and
+connection check, and carried a runtime `ALTER TABLE ingestion_log DROP CONSTRAINT … ADD
+CONSTRAINT …` block (added in Addendum D). Normal jobs therefore held DDL rights they used
+every run.
+
+Now:
+
+| Piece | Role |
+|---|---|
+| `src/db/migrations/0001_baseline.sql` | The schema exactly as it stood (verified: `pg_dump -s` identical to the old `schema.sql` output). All `IF NOT EXISTS`, so a no-op on the existing Neon database. |
+| `src/db/migrations/0002_ingestion_log_partial_status.sql` | The old runtime ALTER, guarded: it inspects the constraint and only rebuilds it if `partial` is missing. On Neon it is a no-op (verified locally: constraint OID unchanged). |
+| `src/db/migrate.py` | Applies pending migrations in order, each in its own transaction, under an advisory lock; records a SHA-256 of each file in `schema_migrations` and refuses to continue if an applied file is later edited. |
+| `scripts/migrate.py` | `status` (read-only) and `apply`. `apply` fingerprints `daily_bars_raw`, `universe_membership` and `symbols` (row count, range, and a sum of per-row hashes) before and after, and fails if any existing table changed. |
+| `.github/workflows/migrate.yml` | The only workflow that changes schema. Manual, `database-writer` group. |
+| daily update, backfill | Call `require_current_schema()`: a read-only check that stops the job if a migration is pending. They contain no DDL (enforced by test). |
+
+The only change this makes to the production database is one new bookkeeping table,
+`schema_migrations`, with one row per migration. It is reversible with
+`DROP TABLE schema_migrations`, which touches no market data.
+
+## F.4 Archived: the completed universe-interval migration
+
+`scripts/migrate_universe.py` and `.github/workflows/migrate-universe.yml` (Addendum C) were
+moved to `archive/2026-09-universe-interval-migration/`. The migration completed in
+September 2026; its workflow was still dispatchable and capable of `DROP TABLE`. The files are
+kept, unmodified, as the audit trail for Addendum C.
+
+## F.5 Neon pricing was misstated
+
+This report (B.5) and the Phase 0 report (§3.3, §10) said Neon's paid tier "starts around
+$19/month". Neon's paid Launch plan is usage-based with no monthly minimum (as checked during
+the transformation audit: about $0.35 per GB-month of storage and about $0.106 per CU-hour
+of compute). For this project's size — a few hundred MB and short daily bursts — the
+estimated bill if the free tier is outgrown is a few dollars a month, not $19. This is an
+estimate; confirm on Neon's pricing page before any purchase decision.
+
+## F.6 Other wording corrected
+
+- `src/pipeline.py` docstring said scheduled runs are "delayed 15-30 min and can be skipped
+  entirely". Measured delays on this repository are 250–288 minutes; none were skipped.
+- Addendum E.2 table and E.3 corrected as marked in place.
+
+## F.7 Not fixed in Phase 1a, and why
+
+- **The runtime database role can still run DDL.** Jobs no longer *do*, and the connection
+  check *cannot*, but the daily update and backfill connect as the same Neon role that the
+  migrator uses. Separating a no-DDL runtime role needs a new Neon role and a new secret,
+  which Phase 1a was not authorised to create.
+- **Scheduled delivery is still ~4–5 hours late.** Unchanged; see E.3.
+- **Public-repository scheduled workflows are auto-disabled after 60 days without repository
+  activity** (GitHub's documented rule, which Phase 0 noted applied to public repositories
+  only; this repository is now public).

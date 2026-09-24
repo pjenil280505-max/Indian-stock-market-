@@ -17,10 +17,35 @@ Most of the hypothesis families this system will test are expected to fail out-o
 realistic Indian transaction costs are applied. The ability to report "nothing qualified" is a
 feature, not a defect.
 
-## Status: Phase 0 complete — awaiting review
+## Status: Phase 1 data foundation running; Phase 1a hardening applied
+
+*Corrected in Phase 1a: this section previously said "Phase 0 complete — no system has been
+built or deployed", which stopped being true in Phase 1.*
+
+- **Phase 1** built and deployed the daily NSE data pipeline (GitHub Actions → Neon
+  PostgreSQL), a resumable historical backfill, and point-in-time universe intervals. See
+  [`docs/PHASE_1_REPORT.md`](docs/PHASE_1_REPORT.md).
+- **Phase 1a** fixed the writer-lock defect, made the connection check read-only, moved
+  schema changes into versioned migrations, and corrected earlier report errors
+  (Addendum F).
+
+### Schema changes
+
+Normal jobs never run DDL. They stop with a clear message if a migration is pending.
+
+```bash
+python3 scripts/migrate.py status   # read-only
+python3 scripts/migrate.py apply    # applies pending migrations; fails if protected data changes
+```
+
+In CI use **Actions → Database migrations → Run workflow** (`status` first, then `apply`).
+New schema changes go in a new `src/db/migrations/NNNN_name.sql` file; an applied file must
+never be edited.
+
+## Phase 0 (discovery) summary
 
 Phase 0 was discovery only: audit the environment, verify what data is actually available and
-legally usable, and choose an architecture. **No system has been built or deployed.**
+legally usable, and choose an architecture.
 
 **Read [`docs/PHASE_0_REPORT.md`](docs/PHASE_0_REPORT.md) for the full findings.**
 

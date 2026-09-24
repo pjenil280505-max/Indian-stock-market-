@@ -27,8 +27,16 @@ on:
         default: '10'
 
 concurrency:
-  # Never let two runs write concurrently; a delayed run must not race a manual one.
-  group: daily-data-update
+  # One writer lock for every job that writes to the database: this job, the
+  # historical backfill and the migrations workflow all use `database-writer`,
+  # so none of them can run at the same time as another. (Before Phase 1a this
+  # group was `daily-data-update`, which did NOT exclude the backfill.)
+  #
+  # GitHub keeps at most one pending run per group: if a second run queues
+  # while one is already pending, the older pending run is cancelled. Every
+  # writer here is idempotent and resumable, so a cancelled pending run loses
+  # no data - it is simply picked up by the next run.
+  group: database-writer
   cancel-in-progress: false
 
 permissions:

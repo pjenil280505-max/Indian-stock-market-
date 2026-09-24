@@ -20,7 +20,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from src.config import load_settings  # noqa: E402
-from src.db.repository import Repository, apply_schema, connect  # noqa: E402
+from src.db.migrate import require_current_schema  # noqa: E402
+from src.db.repository import Repository, connect  # noqa: E402
 from src.pipeline import DEFAULT_CATCHUP_DAYS, DailyPipeline  # noqa: E402
 from src.sources.nse import NseSource  # noqa: E402
 from src.sources.upstox import UpstoxSource  # noqa: E402
@@ -64,7 +65,7 @@ def main() -> int:
         log.warning("UPSTOX_ANALYTICS_TOKEN not set - adjusted bars will be skipped")
 
     with connect(settings.database_url) as conn:
-        apply_schema(conn)
+        require_current_schema(conn)  # read-only; this job never runs DDL
         repo = Repository(conn)
         pipeline = DailyPipeline(repo, nse=NseSource(), upstox=upstox)
         summary = pipeline.run(today=today, catchup_days=args.catchup_days)
