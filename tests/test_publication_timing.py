@@ -4,6 +4,7 @@ The pipeline now attempts the CURRENT trading day, which means it can legitimate
 arrive before NSE has published. Mis-handling that in the permanent direction
 silently loses a trading day forever, because a settled date is never re-fetched.
 """
+import re
 import sys
 from dataclasses import dataclass
 from datetime import date
@@ -108,11 +109,12 @@ class TestDeliveryCompleteness:
 class TestCronSchedule:
     @staticmethod
     def _crons():
-        import yaml
-        wf = yaml.safe_load(
-            (Path(__file__).resolve().parents[1]
-             / ".github/workflows/daily-data-update.yml").read_text())
-        return [e["cron"] for e in wf[True]["schedule"]]
+        # Parsed with a regex, not PyYAML: CI installs only requirements*.txt,
+        # and a yaml import here kept CI red from 802558f until Phase 1a while
+        # passing locally wherever PyYAML happened to be installed.
+        text = (Path(__file__).resolve().parents[1]
+                / ".github/workflows/daily-data-update.yml").read_text()
+        return re.findall(r"^\s*-\s*cron:\s*'([^']+)'", text, re.MULTILINE)
 
     def test_two_fires_per_trading_day(self):
         assert len(self._crons()) == 2

@@ -649,6 +649,11 @@ estimate; confirm on Neon's pricing page before any purchase decision.
 - `src/pipeline.py` docstring said scheduled runs are "delayed 15-30 min and can be skipped
   entirely". Measured delays on this repository are 250–288 minutes; none were skipped.
 - Addendum E.2 table and E.3 corrected as marked in place.
+- **CI was red on `main` from `802558f` until Phase 1a.** `tests/test_publication_timing.py`
+  imported PyYAML, which CI does not install; the commits in that period reported "196 tests
+  pass" from a local environment that happened to have it. The test now parses the cron
+  lines with a regex and the suite is verified in a clean virtualenv built only from
+  `requirements*.txt`, as CI builds it.
 
 ## F.7 Not fixed in Phase 1a, and why
 
