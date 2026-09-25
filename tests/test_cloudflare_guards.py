@@ -50,6 +50,26 @@ class TestWorkerCannotReachData:
         ).lower()
         assert needle.lower() not in code
 
+    @pytest.mark.parametrize("needle", ["DATABASE_URL", "neon", "postgres", "upstox"])
+    def test_nse_probe_has_no_database_or_upstox_access(self, needle):
+        code = "\n".join(
+            line for line in (WORKER / "src" / "nse_probe.js").read_text().splitlines()
+            if not line.strip().startswith("//")
+        ).lower()
+        assert needle.lower() not in code
+
+    def test_nse_probe_is_get_only_and_nse_hosts_only(self):
+        src = (WORKER / "src" / "nse_probe.js").read_text()
+        methods = set(re.findall(r'method:\s*"([A-Z]+)"', src))
+        assert methods == {"GET"}
+        hosts = set(re.findall(r'https://([a-z0-9.-]+)', src))
+        assert hosts == {"nsearchives.nseindia.com", "www.nseindia.com"}
+
+    def test_only_worker_src_files_are_known(self):
+        """A new source file must be reviewed against these guards."""
+        names = sorted(p.name for p in (WORKER / "src").glob("*.js"))
+        assert names == ["index.js", "nse_probe.js"]
+
     def test_only_two_workflows_targetable(self):
         src = (WORKER / "src" / "index.js").read_text()
         targets = set(re.findall(r'"([a-z0-9-]+\.yml)"', src))

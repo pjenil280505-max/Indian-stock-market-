@@ -16,6 +16,8 @@
 // All times are UTC. Cloudflare evaluates cron expressions in UTC and
 // `scheduledTime` is a UTC epoch; it is logged as an ISO-8601 "Z" string.
 
+import { probe, resolveTarget } from "./nse_probe.js";
+
 export const WORKFLOWS = Object.freeze({
   test: "cloudflare-dispatch-probe.yml",
   production: "daily-data-update.yml",
@@ -194,7 +196,7 @@ const json = (status, body) =>
  */
 export async function handleFetch(request, env, fetchImpl = fetch) {
   const url = new URL(request.url);
-  const known = url.pathname === "/__test-dispatch" || url.pathname === "/__test-auth";
+  const known = ["/__test-dispatch", "/__test-auth", "/__test-nse"].includes(url.pathname);
   if (request.method !== "POST" || !known || !env.TEST_TRIGGER_KEY) {
     return json(404, { error: "not found" });
   }
@@ -206,12 +208,29 @@ export async function handleFetch(request, env, fetchImpl = fetch) {
   // Key check only, no dispatch: lets the deploy workflow prove a rotated-out
   // key is dead without risking an extra probe run.
   if (url.pathname === "/__test-auth") return new Response(null, { status: 204 });
+  if (url.pathname === "/__test-nse") return nseProbe(request, url, fetchImpl);
   const outcome = await run(
     { cron: "manual-test", scheduledTime: Date.now(), source: "manual-test" },
     env,
     fetchImpl,
   );
   return json(outcome.ok ? 200 : 502, outcome);
+}
+
+// Read-only Cloudflare -> NSE connectivity probe. One allowlisted NSE
+// resource per call; measurements only, nothing stored. Reachable ONLY from
+// the key-guarded endpoint above - the cron handler never calls it.
+async function nseProbe(request, url, fetchImpl) {
+  let target;
+  try {
+    target = resolveTarget(url.searchParams.get("target"), url.searchParams.get("date"));
+  } catch (err) {
+    return json(400, { error: err.message });
+  }
+  const result = await probe(target, { fetchImpl });
+  const edge = { colo: request.cf?.colo ?? null, country: request.cf?.country ?? null };
+  log("info", "nse_probe", { target: result.target, status: result.status, total_ms: result.total_ms, colo: edge.colo });
+  return json(200, { ...result, cloudflare: edge, probed_at_utc: new Date().toISOString() });
 }
 
 export default {

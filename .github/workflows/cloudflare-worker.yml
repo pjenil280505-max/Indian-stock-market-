@@ -12,6 +12,13 @@ name: Cloudflare Worker
 #   deploy-and-test  Deploy to Cloudflare, invoke the DEPLOYED Worker once
 #                    through its key-guarded test endpoint (one probe
 #                    dispatch), then rotate the key to a value nobody holds.
+#   nse-connectivity-test
+#                    Deploy, then have the DEPLOYED Worker GET each NSE
+#                    resource the pipeline uses, once, and report status,
+#                    latency and payload structure. The same requests are
+#                    repeated from this GitHub runner for comparison.
+#                    Read-only: nothing is stored, nothing is dispatched,
+#                    Neon and Upstox are not contacted. Key rotated after.
 #
 # Secrets (repository secrets; values never printed):
 #   CLOUDFLARE_API_TOKEN   Account token, Workers Scripts: Edit, this account only
@@ -24,8 +31,12 @@ on:
         description: 'What to do'
         required: true
         type: choice
-        options: [check-secrets, local-test, deploy-and-test]
+        options: [check-secrets, local-test, deploy-and-test, nse-connectivity-test]
         default: check-secrets
+      trade_date:
+        description: 'nse-connectivity-test only: a PUBLISHED trading day, YYYY-MM-DD'
+        required: false
+        default: ''
 
 concurrency:
   group: cloudflare-worker
@@ -101,7 +112,7 @@ jobs:
       # ----------------------------------------------------- deploy-and-test
       - name: Deploy
         id: deploy
-        if: inputs.action == 'deploy-and-test'
+        if: inputs.action == 'deploy-and-test' || inputs.action == 'nse-connectivity-test'
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
@@ -148,8 +159,88 @@ jobs:
           [ "$code" = 200 ] || { echo "::error::deployed Worker did not dispatch (HTTP $code)"; exit 1; }
           python3 -c "import json,sys; d=json.load(open(sys.argv[1])); assert d['ok'] and d['kind']=='test' and d['workflow']=='cloudflare-dispatch-probe.yml', d; print('GitHub run id:', d.get('workflow_run_id'))" "$RUNNER_TEMP/invoke.json"
 
+      # ----------------------------------------------- nse-connectivity-test
+      - name: Cloudflare -> NSE (deployed Worker, one GET per target)
+        if: inputs.action == 'nse-connectivity-test'
+        env:
+          URL: ${{ steps.deploy.outputs.url }}
+          TRADE_DATE: ${{ inputs.trade_date }}
+        run: |
+          set -uo pipefail
+          [[ "$TRADE_DATE" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] || { echo "::error::trade_date (YYYY-MM-DD) is required"; exit 1; }
+          TODAY=$(date -u +%Y-%m-%d)
+          mkdir -p "$RUNNER_TEMP/nse"
+          n=0
+          for spec in "universe" "delivery_bhavcopy&date=$TRADE_DATE" "udiff_bhavcopy&date=$TRADE_DATE" \
+                      "corporate_actions" "delivery_bhavcopy&date=$TODAY"; do
+            n=$((n+1))
+            # Retry only while the new deployment is not yet serving (the
+            # Worker answers 200 for every probe it runs, whatever NSE says),
+            # so each target is requested from NSE exactly once.
+            for i in $(seq 1 36); do
+              code=$(curl -s -o "$RUNNER_TEMP/nse/cf_$n.json" -w '%{http_code}' -X POST \
+                     -H "Authorization: Bearer $TEST_KEY" "$URL/__test-nse?target=$spec" || echo 000)
+              [ "$code" = 200 ] && break
+              echo "target $n: Worker not ready (HTTP $code), retrying"; sleep 5
+            done
+            echo "--- cloudflare probe $n ($spec)"; cat "$RUNNER_TEMP/nse/cf_$n.json"; echo
+            sleep 2   # courtesy pause between NSE requests
+          done
+
+      - name: GitHub runner -> NSE (same requests, for comparison)
+        if: inputs.action == 'nse-connectivity-test'
+        env:
+          TRADE_DATE: ${{ inputs.trade_date }}
+        run: |
+          set -uo pipefail
+          UA='indian-stock-research/0.1 (+personal research; contact via repository owner)'
+          TODAY=$(date -u +%Y-%m-%d)
+          d() { date -u -d "$1" +"$2"; }
+          urls=(
+            "universe|https://nsearchives.nseindia.com/content/equities/EQUITY_L.csv"
+            "delivery_bhavcopy $TRADE_DATE|https://nsearchives.nseindia.com/products/content/sec_bhavdata_full_$(d "$TRADE_DATE" %d%m%Y).csv"
+            "udiff_bhavcopy $TRADE_DATE|https://nsearchives.nseindia.com/content/cm/BhavCopy_NSE_CM_0_0_0_$(d "$TRADE_DATE" %Y%m%d)_F_0000.csv.zip"
+            "corporate_actions|https://www.nseindia.com/api/corporates-corporateActions?index=equities"
+            "delivery_bhavcopy $TODAY|https://nsearchives.nseindia.com/products/content/sec_bhavdata_full_$(d "$TODAY" %d%m%Y).csv"
+          )
+          : > "$RUNNER_TEMP/nse/gh.tsv"
+          for entry in "${urls[@]}"; do
+            name=${entry%%|*}; url=${entry#*|}
+            m=$(curl -s -o /dev/null -A "$UA" --max-time 60 \
+                -w '%{http_code}\t%{time_starttransfer}\t%{time_total}\t%{size_download}\t%{content_type}' "$url" || echo "000")
+            printf '%s\t%s\n' "$name" "$m" | tee -a "$RUNNER_TEMP/nse/gh.tsv"
+            sleep 2
+          done
+
+      - name: Connectivity summary
+        if: inputs.action == 'nse-connectivity-test'
+        run: |
+          python3 - "$RUNNER_TEMP/nse" <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
+          import glob, json, os, sys
+          d = sys.argv[1]
+          print("| # | target | CF status | CF headers ms | CF total ms | bytes | blocked? | data check | GH status | GH total ms |")
+          print("|---|---|---|---|---|---|---|---|---|---|")
+          gh = [l.rstrip("\n").split("\t") for l in open(os.path.join(d, "gh.tsv"))]
+          for i, row in enumerate(gh, 1):
+              try:
+                  r = json.load(open(os.path.join(d, f"cf_{i}.json")))
+              except Exception:
+                  r = {}
+              data = r.get("data") or {}
+              check = (f"{data.get('rows')} rows" if "rows" in data else
+                       f"zip ok={data.get('valid')}" if "valid" in data else
+                       f"{data.get('records')} records" if "records" in data else
+                       r.get("parse_error") or r.get("error") or "-")
+              gh_status = row[1] if len(row) > 1 else "?"
+              gh_total = f"{float(row[3]) * 1000:.0f}" if len(row) > 3 else "?"
+              print(f"| {i} | {row[0]} | {r.get('status')} | {r.get('headers_ms')} | {r.get('total_ms')} | "
+                    f"{r.get('bytes')} | {r.get('blocked_suspected')} | {check} | {gh_status} | {gh_total} |")
+          colo = {json.load(open(f)).get("cloudflare", {}).get("colo") for f in glob.glob(os.path.join(d, "cf_*.json"))}
+          print(f"\nCloudflare colo(s) that ran the probes: {sorted(c for c in colo if c)}")
+          PY
+
       - name: Rotate the test key away and prove the old one is dead
-        if: always() && inputs.action == 'deploy-and-test' && steps.deploy.outputs.url != ''
+        if: always() && (inputs.action == 'deploy-and-test' || inputs.action == 'nse-connectivity-test') && steps.deploy.outputs.url != ''
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
