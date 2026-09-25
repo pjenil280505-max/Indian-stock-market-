@@ -15,6 +15,17 @@ name: Daily data update
 # Neither is on the hour. The previous schedule used minute 0 and was observed
 # firing 4h48m late on 2026-09-23; GitHub's own guidance is that :00 is the
 # worst minute to pick, which the earlier schedule ignored.
+# Run names identify the trigger in the Actions list:
+#   "Daily data update (cloudflare 2026-09-25 <request id>)"  Cloudflare Worker
+#   "Daily data update (schedule)"                            GitHub's own cron
+#   "Daily data update (workflow_dispatch)"                   manual run
+# The Worker's readiness gate reads this name to know whether today's run
+# already exists, so the "cloudflare <date>" format is load-bearing.
+run-name: >-
+  ${{ inputs.request_id
+      && format('Daily data update (cloudflare {0} {1})', inputs.trade_date, inputs.request_id)
+      || format('Daily data update ({0})', github.event_name) }}
+
 on:
   schedule:
     - cron: '41 11 * * 1-5'
@@ -25,6 +36,14 @@ on:
         description: 'How many days back to catch up'
         required: false
         default: '10'
+      request_id:
+        description: 'Set by the Cloudflare Worker; leave blank for manual runs'
+        required: false
+        default: ''
+      trade_date:
+        description: 'Set by the Cloudflare Worker (IST trade date it verified as published); leave blank'
+        required: false
+        default: ''
 
 concurrency:
   # One writer lock for every job that writes to the database: this job, the

@@ -1,22 +1,27 @@
 // Cloudflare Cron -> GitHub Actions workflow_dispatch.
 //
-// This Worker is a trigger and nothing else. It holds no market data, never
-// talks to Neon or NSE, and runs no pipeline code. Its only outbound request
-// is a single POST to the GitHub API asking GitHub to start a workflow; the
-// existing Python pipeline then runs on GitHub's runners exactly as before,
-// under the same `database-writer` concurrency lock.
+// This Worker is a trigger. It holds no market data, never talks to Neon or
+// Upstox, and runs no pipeline code. The Python pipeline runs on GitHub's
+// runners under the existing `database-writer` concurrency lock.
 //
 // Two kinds of invocation, kept strictly apart:
 //   test        -> cloudflare-dispatch-probe.yml, a no-op workflow with no
-//                  secrets and no database access.
-//   production  -> daily-data-update.yml. DISABLED: it requires both
-//                  PRODUCTION_ENABLED = "true" and a cron listed in
-//                  PRODUCTION_CRONS, and neither is set in Phase 1b.
+//                  secrets and no database access. No readiness check.
+//   production  -> daily-data-update.yml, gated by src/readiness.js: it is
+//                  dispatched only once NSE has published the day's file and
+//                  no run for that date is already queued, running or done.
+//                  DISABLED: requires PRODUCTION_ENABLED = "true" AND a cron
+//                  listed in PRODUCTION_CRONS; neither is set.
+//
+// Outbound requests: api.github.com (dispatch, and reading today's runs for
+// the gate) and GETs of the allowlisted NSE files (readiness and the
+// key-guarded probe endpoints). Nothing else.
 //
 // All times are UTC. Cloudflare evaluates cron expressions in UTC and
-// `scheduledTime` is a UTC epoch; it is logged as an ISO-8601 "Z" string.
+// `scheduledTime` is a UTC epoch; the trade date is derived in IST.
 
 import { probe, resolveTarget } from "./nse_probe.js";
+import { evaluate, runTag } from "./readiness.js";
 
 export const WORKFLOWS = Object.freeze({
   test: "cloudflare-dispatch-probe.yml",
@@ -70,7 +75,11 @@ export function buildDispatch(kind, meta, env) {
           scheduled_time: meta.scheduledTime,
           request_id: meta.requestId,
         }
-      : { catchup_days: "10" };
+      : {
+          catchup_days: "10",
+          request_id: meta.requestId,
+          trade_date: meta.tradeDate,
+        };
 
   return { workflow, url, body: { ref: env.GITHUB_REF || "main", inputs } };
 }
@@ -164,9 +173,25 @@ export async function run({ cron, scheduledTime, source }, env, fetchImpl = fetc
     return { ...base, ok: true, skipped: true, reason: decision.reason };
   }
 
-  const request = buildDispatch(decision.kind, { cron, scheduledTime: scheduled, requestId }, env);
+  let readiness = null;
+  if (decision.kind === "production") {
+    // Gate: dispatch the real pipeline only once NSE has published and no
+    // run for this date is already queued, running or done.
+    readiness = await evaluate({ scheduledTime, env, fetchImpl });
+    base.trade_date = readiness.trade_date;
+    if (readiness.decision.action !== "dispatch") {
+      log("info", "not_dispatched", { ...base, reason: readiness.decision.reason, readiness });
+      return { ...base, ok: true, skipped: true, reason: readiness.decision.reason, readiness };
+    }
+  }
+
+  const request = buildDispatch(
+    decision.kind,
+    { cron, scheduledTime: scheduled, requestId, tradeDate: readiness?.trade_date },
+    env,
+  );
   const result = await dispatch(request, env, fetchImpl);
-  const outcome = { ...base, workflow: request.workflow, ...result };
+  const outcome = { ...base, workflow: request.workflow, ...result, ...(readiness ? { readiness } : {}) };
   log(result.ok ? "info" : "error", result.ok ? "dispatch_ok" : "dispatch_failed", outcome);
   return outcome;
 }
@@ -196,7 +221,7 @@ const json = (status, body) =>
  */
 export async function handleFetch(request, env, fetchImpl = fetch) {
   const url = new URL(request.url);
-  const known = ["/__test-dispatch", "/__test-auth", "/__test-nse"].includes(url.pathname);
+  const known = ["/__test-dispatch", "/__test-auth", "/__test-nse", "/__test-readiness"].includes(url.pathname);
   if (request.method !== "POST" || !known || !env.TEST_TRIGGER_KEY) {
     return json(404, { error: "not found" });
   }
@@ -209,6 +234,7 @@ export async function handleFetch(request, env, fetchImpl = fetch) {
   // key is dead without risking an extra probe run.
   if (url.pathname === "/__test-auth") return new Response(null, { status: 204 });
   if (url.pathname === "/__test-nse") return nseProbe(request, url, fetchImpl);
+  if (url.pathname === "/__test-readiness") return readinessDryRun(url, env, fetchImpl);
   const outcome = await run(
     { cron: "manual-test", scheduledTime: Date.now(), source: "manual-test" },
     env,
@@ -231,6 +257,22 @@ async function nseProbe(request, url, fetchImpl) {
   const edge = { colo: request.cf?.colo ?? null, country: request.cf?.country ?? null };
   log("info", "nse_probe", { target: result.target, status: result.status, total_ms: result.total_ms, colo: edge.colo });
   return json(200, { ...result, cloudflare: edge, probed_at_utc: new Date().toISOString() });
+}
+
+// DRY RUN of the production gate for a given trade date and UTC time of
+// day. Reads GitHub and NSE exactly as a production fire would, returns the
+// decision, and NEVER dispatches - whatever PRODUCTION_ENABLED says.
+async function readinessDryRun(url, env, fetchImpl) {
+  const date = url.searchParams.get("date") ?? "";
+  const at = url.searchParams.get("at") ?? "11:45";
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || !/^\d{2}:\d{2}$/.test(at)) {
+    return json(400, { error: "date=YYYY-MM-DD and at=HH:MM (UTC) required" });
+  }
+  const scheduledTime = Date.parse(`${date}T${at}:00Z`);
+  if (Number.isNaN(scheduledTime)) return json(400, { error: "invalid date/time" });
+  const result = await evaluate({ scheduledTime, env, fetchImpl });
+  log("info", "readiness_dry_run", { trade_date: result.trade_date, at_utc: at, decision: result.decision });
+  return json(200, { dry_run: true, dispatched: false, at_utc: at, run_tag: runTag(result.trade_date), ...result });
 }
 
 export default {

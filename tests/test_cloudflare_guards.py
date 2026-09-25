@@ -68,7 +68,16 @@ class TestWorkerCannotReachData:
     def test_only_worker_src_files_are_known(self):
         """A new source file must be reviewed against these guards."""
         names = sorted(p.name for p in (WORKER / "src").glob("*.js"))
-        assert names == ["index.js", "nse_probe.js"]
+        assert names == ["index.js", "nse_probe.js", "readiness.js"]
+
+    def test_readiness_gate_is_read_only(self):
+        """The gate observes GitHub and NSE; it never POSTs or dispatches."""
+        src = (WORKER / "src" / "readiness.js").read_text()
+        assert set(re.findall(r'method:\s*"([A-Z]+)"', src)) == {"GET"}
+        assert set(re.findall(r'https://([a-z0-9.-]+)', src)) == {"api.github.com"}
+        assert "/dispatches" not in src  # the dispatch API path
+        for needle in ("DATABASE_URL", "neon", "postgres", "upstox"):
+            assert needle not in src.lower()
 
     def test_only_two_workflows_targetable(self):
         src = (WORKER / "src" / "index.js").read_text()
@@ -112,3 +121,31 @@ class TestNoCommittedCredentials:
     def test_local_secret_files_are_ignored(self):
         ignored = (WORKER / ".gitignore").read_text().split()
         assert ".dev.vars" in ignored and "node_modules/" in ignored
+
+
+class TestDailyWorkflowTagging:
+    WF = WORKFLOWS / "daily-data-update.yml"
+
+    def test_run_name_carries_cloudflare_tag(self):
+        text = self.WF.read_text()
+        assert "format('Daily data update (cloudflare {0} {1})', inputs.trade_date, inputs.request_id)" in text
+        assert "format('Daily data update ({0})', github.event_name)" in text
+
+    def test_new_inputs_are_optional_with_blank_defaults(self):
+        """Manual and scheduled runs must keep working without them."""
+        text = self.WF.read_text()
+        for name in ("request_id", "trade_date"):
+            block = re.search(rf"^      {name}:\n((?:        .*\n)+)", text, re.M)
+            assert block, name
+            assert "required: false" in block.group(1) and "default: ''" in block.group(1)
+
+    def test_inputs_never_reach_a_shell(self):
+        """request_id/trade_date come from outside; they may appear only in run-name."""
+        text = self.WF.read_text()
+        steps = text[text.index("steps:"):]
+        assert "inputs.request_id" not in steps and "inputs.trade_date" not in steps
+
+    def test_github_schedule_unchanged_in_this_phase(self):
+        """Changing GitHub's own schedule is a separate, approved decision."""
+        crons = re.findall(r"^\s*-\s*cron:\s*'([^']+)'", self.WF.read_text(), re.M)
+        assert crons == ["41 11 * * 1-5", "17 14 * * 1-5"]

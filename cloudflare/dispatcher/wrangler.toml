@@ -29,6 +29,10 @@ TEST_CRONS = "37 4 * * *"
 # [triggers], and a reviewed commit - see cloudflare/dispatcher/README.md.
 PRODUCTION_CRONS = ""
 PRODUCTION_ENABLED = "false"
+# Readiness gate (src/readiness.js), used only by production fires: from this
+# UTC time a UDiFF-only day is accepted as "partial" instead of waiting for
+# the delivery file. Inert while production is off.
+READINESS_FINAL_UTC = "14:45"
 
 [observability]
 enabled = true

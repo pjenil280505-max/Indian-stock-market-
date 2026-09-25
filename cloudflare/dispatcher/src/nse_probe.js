@@ -75,7 +75,7 @@ function centralCompressedSize(dv) {
 
 /** Structural check of a ZIP: local-header magic, first entry name, and the
  *  first decompressed line (the CSV header). Reads only the first entry. */
-export async function inspectZip(bytes) {
+export async function inspectZip(bytes, { lines = 1 } = {}) {
   const u8 = new Uint8Array(bytes);
   const dv = new DataView(u8.buffer, u8.byteOffset, u8.byteLength);
   if (u8.length < 30 || dv.getUint32(0, true) !== 0x04034b50) return { valid: false };
@@ -91,20 +91,24 @@ export async function inspectZip(bytes) {
   // compressed data does - workerd rejects trailing bytes.
   if (flags & 0x08 || compSize === 0) compSize = centralCompressedSize(dv) ?? 0;
   let header = null;
+  let firstRow = null;
   if (method === 8 && compSize > 0 && start + compSize <= u8.length) {
     const stream = new Blob([u8.subarray(start, start + compSize)]).stream().pipeThrough(new DecompressionStream("deflate-raw"));
     const reader = stream.getReader();
     let text = "";
     const dec = new TextDecoder();
-    while (!text.includes("\n") && text.length < 4096) {
+    const newlines = () => text.split("\n").length - 1;
+    while (newlines() < lines && text.length < 8192) {
       const { value, done } = await reader.read();
       if (done) break;
       text += dec.decode(value, { stream: true });
     }
     await reader.cancel().catch(() => {});
     header = firstLine(text);
+    if (lines > 1) firstRow = (text.split("\n")[1] ?? "").replace(/\r$/, "").slice(0, 300);
   }
-  return { valid: true, first_entry: entry, compression: method, csv_header: header };
+  const out = { valid: true, first_entry: entry, compression: method, csv_header: header };
+  return lines > 1 ? { ...out, first_row: firstRow } : out;
 }
 
 /** Fetch one target and measure it. Never throws; failures are reported. */
