@@ -791,3 +791,119 @@ contacted. The production flags and `wrangler.toml` are unchanged.
 Neon fingerprint: identical before (run 36116259457) and after (run 36116431702), matching
 every Phase 1a/1b fingerprint. No data workflow ran: the daily update is still at 10 runs,
 the backfill at 2, and the probe at 3.
+
+---
+
+# Addendum I — Readiness gate, run tagging, schedule analysis (2026-09-25)
+
+Production remains **disabled**. This phase builds and tests what production would run.
+
+## I.1 Readiness gate (`cloudflare/dispatcher/src/readiness.js`)
+
+Evaluated on every production fire, cheapest check first. Nothing is dispatched unless all
+the checks pass:
+
+| Step | Check | Outcome |
+|---|---|---|
+| 1 | GitHub: runs of `daily-data-update.yml` for the IST trade date tagged `cloudflare <date>` | queued/running/succeeded → **skip**; ≥2 failed → **skip** (retry budget); GitHub unreadable → **skip** (fail closed) |
+| 2 | NSE delivery bhavcopy | 200 + `DATE1`/`DELIV_PER` header + first row dated the trade date + ≥500 rows → **dispatch (complete)** |
+| 3 | Only from `READINESS_FINAL_UTC` (14:45): UDiFF zip, first row dated right | **dispatch (partial)**; the pipeline enriches the day later |
+| — | otherwise | **skip** |
+
+NSE is not contacted once today's run exists. The trade date is the IST date of the UTC fire
+time.
+
+**Live dry run on the deployed Worker** (Actions 36133318095, version `2ec93987…`), which never
+dispatches:
+
+| Case | Delivery | UDiFF | Decision |
+|---|---|---|---|
+| 2026-09-25 @ 11:45 UTC | 200, 3,507 rows, `25-Sep-2026` | — | dispatch (complete) |
+| 2026-09-28 @ 11:00 UTC | 404 | not checked | skip: not published yet |
+| 2026-09-26 @ 14:45 UTC (Sat) | 404 | 404 | skip: not published by the final window |
+
+The real 25-Sep delivery file is rejected when asked for 24-Sep ("file dated 25-Sep-2026").
+The gate ran within the free plan's 10 ms CPU limit while validating a 397 KB file. Neon was
+unchanged before (run 36133279645) and after (run 36133397610); no daily, backfill or probe run
+was created.
+
+## I.2 Run tagging
+
+`daily-data-update.yml` now has a `run-name`, plus optional blank-default inputs `request_id` and
+`trade_date` that are used only in that name and never in a shell step:
+
+- Cloudflare: `Daily data update (cloudflare 2026-09-25 <request id>)`
+- GitHub cron: `Daily data update (schedule)`
+- Manual: `Daily data update (workflow_dispatch)`
+
+The gate depends on the `cloudflare <date>` tag, so a guard test pins the format. actionlint
+passes, and was confirmed to catch errors inside `run-name`. The GitHub schedule is unchanged.
+
+## I.3 GitHub schedule: analysis and proposal (not applied)
+
+Every observed GitHub scheduled fire was 4–5 hours late: 288, 253 and 250 minutes. None were
+skipped, but GitHub documents that scheduled runs can be delayed or dropped under load. Once
+Cloudflare production runs `*/15 11-14 * * 1-5` with the gate, the first fire after
+publication (typically 11:45 UTC) loads the day. The GitHub fires would then arrive around
+15:50 and 18:30 UTC to find nothing to do, but each still writes an `ingestion_runs` row and
+upserts corporate actions.
+
+| Option | Duplicates | Late runs | If Cloudflare fails (e.g. token expiry) |
+|---|---|---|---|
+| A. Keep both GitHub crons | 2 no-op runs/day | yes | covered |
+| B. Remove both | none | none | **nothing runs, silently** |
+| **C. Remove `41 11`, keep `17 14` as fallback, and let it exit early when today's Cloudflare run succeeded** | none in normal operation | only when needed | covered, about 4 hours late |
+
+**Recommendation: C.** Option B makes the fine-grained token's expiry a silent single point of
+failure. Option A keeps paying for duplicates. Option C keeps an independent path that doesn't
+depend on the token, and costs one near-instant no-op run per day.
+
+## I.4 Exactly what enabling production would change (not applied)
+
+**1. `cloudflare/dispatcher/wrangler.toml`**
+```diff
+ [triggers]
+-crons = ["37 4 * * *"]
++crons = ["37 4 * * *", "*/15 11-14 * * 1-5"]
+@@ [vars]
+-PRODUCTION_CRONS = ""
+-PRODUCTION_ENABLED = "false"
++PRODUCTION_CRONS = "*/15 11-14 * * 1-5"
++PRODUCTION_ENABLED = "true"
+```
+This fires 16 times per weekday, 11:00–14:45 UTC (16:30–20:15 IST), using 2 of the free plan's 5
+cron triggers. Before publication each fire makes 1 GitHub GET and 1 small NSE GET (404,
+~3.5 KB). After the day's dispatch each fire makes only 1 GitHub GET. That is about 3–4 NSE
+requests per day.
+
+**2. `.github/workflows/daily-data-update.yml` (option C)**
+```diff
+ on:
+   schedule:
+-    - cron: '41 11 * * 1-5'
+     - cron: '17 14 * * 1-5'
+ permissions:
+   contents: read
++  actions: read
+ ...
++      - name: Fallback only - skip if Cloudflare already loaded today
++        id: fallback
++        if: github.event_name == 'schedule'
++        env:
++          GH_TOKEN: ${{ github.token }}
++        run: |
++          # UTC date, NOT IST: this fire lands ~18:30 UTC, already tomorrow in IST.
++          day=$(date -u +%Y-%m-%d)
++          n=$(gh api "repos/${{ github.repository }}/actions/workflows/daily-data-update.yml/runs?event=workflow_dispatch&status=success&created=>=$day" \
++                --jq "[.workflow_runs[] | select(.display_title | contains(\"cloudflare $day\"))] | length")
++          echo "skip=$([ "$n" -gt 0 ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+```
+Every later step would also get `if: steps.fallback.outputs.skip != 'true'`.
+
+**3. Tests that must change in the same commit.** Each currently fails the build if
+production is on or the schedule changes:
+- `tests/test_cloudflare_guards.py`: `TestProductionIsOff` (3 tests) and
+  `test_github_schedule_unchanged_in_this_phase`
+- `tests/test_publication_timing.py`: `test_two_fires_per_trading_day` and
+  `test_fires_are_separated_enough_to_enrich`
+- `cloudflare/dispatcher/test/index.test.js`: "the committed wrangler.toml keeps production off"
