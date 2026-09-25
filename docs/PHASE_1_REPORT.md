@@ -670,8 +670,8 @@ estimate; confirm on Neon's pricing page before any purchase decision.
 
 # Addendum G — Phase 1b: Cloudflare Cron → GitHub dispatch trigger (2026-09-24)
 
-**Status: built and verified locally; not yet deployed.** Deployment needs three repository
-secrets that only the account owner can create (see G.3). No Cloudflare resource exists yet.
+**Status: deployed 2026-09-25 04:05 UTC and verified end to end in TEST mode only.** Production
+dispatch remains disabled. See G.6 for the live evidence.
 
 ## G.1 What was built
 
@@ -720,7 +720,39 @@ not what the token can do if it leaks.
   digest -39741809479; `symbols` 2,585, digest 57018452335. These are identical to the Phase 1a
   post-migration fingerprint.
 
-## G.5 Remaining to PASS
+## G.5 Credentials
 
-Create the three secrets, then run **Actions → Cloudflare Worker** with `local-test` and then
-`deploy-and-test`, and re-run `migrate.py status` to confirm the fingerprint is unchanged.
+The three repository secrets were created by the account owner on 2026-09-25. Their values
+appear in no log: GitHub masks them as `***`, and Wrangler lists the Worker secrets as `(hidden)`.
+
+## G.6 Live verification (2026-09-25)
+
+| Step | Run | Evidence |
+|---|---|---|
+| Local cron test (workerd on a GitHub runner, real token) | Actions 36092911394 | Worker logged `dispatch_ok`, request `55c69ab4…`, GitHub HTTP 204 |
+| → probe started | Actions 36092930316 | run-name carries `55c69ab4…`; created 04:04:22, 1 s after dispatch |
+| Deploy | Actions 36092952992 | `nse-pipeline-dispatcher`, version `a5ea841c-30f1-4867-bc88-ca68a23a0d75`, trigger `schedule: 37 4 * * *`, `PRODUCTION_ENABLED ("false")` |
+| Deployed Worker invoked once (test endpoint) | same run | Worker on Cloudflare returned `ok:true, kind:test, workflow:cloudflare-dispatch-probe.yml`, request `3cc6fa0d…`, GitHub HTTP 204 |
+| → probe started | Actions 36092983417 | run-name carries `3cc6fa0d…`; job started 5 s after the Worker's timestamp |
+| Test key rotated away | same run | old key: 204 on the non-dispatching `/__test-auth`, then 401 five seconds later |
+| Public surface probed from outside | — | `GET /` 404; `POST /__test-dispatch` with no key or a wrong key 401; `/__scheduled` 404 |
+| **Real Cloudflare cron fire** (`37 4 * * *`) | Actions 36095196493 | scheduled time 04:37:30.000Z (as reported by Cloudflare); run created 04:37:31; job running 04:37:36 (**36 s after the nominal cron minute**, against 250–288 min for GitHub's own `schedule`) |
+| Neon after all tests | Actions 36093032212 | fingerprint identical to baseline 36058423103 (all three digests) |
+| Neon after the scheduled fire | Actions 36095233036 | identical again |
+| No data workflow triggered | — | the daily update's last run is still #10 (2026-09-24 20:41 UTC); the backfill's is still #2 |
+
+**Documentation vs reality.** GitHub's REST docs now describe the dispatch endpoint as
+returning 200 with `workflow_run_id`. Every live dispatch here returned **204 with no body**.
+The Worker accepts both, and matches runs through the `request_id` in the probe's run-name.
+
+**Not observed directly:** Cloudflare's own dashboard logs and cron event history. The deploy
+token is deliberately limited to Workers Scripts: Edit, which cannot read logs. The account
+owner can see them under Workers & Pages → nse-pipeline-dispatcher → Logs, and Settings →
+Trigger Events. The Cloudflare-side evidence here is the deploy output and the deployed
+Worker's own responses.
+
+## G.7 Still running after Phase 1b
+
+The test cron fires once a day at 04:37 UTC and dispatches only the no-op probe. It costs
+about 10 s of Actions time per day and builds a daily record of Cloudflare → GitHub latency.
+Production dispatch stays disabled until it is explicitly approved.
