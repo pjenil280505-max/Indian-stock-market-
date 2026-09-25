@@ -12,7 +12,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 WORKER = ROOT / "cloudflare" / "dispatcher"
 WORKFLOWS = ROOT / ".github" / "workflows"
-PRODUCTION_CRONS = ("41 11 * * 1-5", "17 14 * * 1-5")
+GITHUB_FALLBACK_CRONS = ("17 14 * * 1-5",)
 
 
 def worker_source_files():
@@ -20,25 +20,44 @@ def worker_source_files():
             and ".wrangler" not in p.parts and p.name != "package-lock.json"]
 
 
-class TestProductionIsOff:
-    def test_production_flag_false(self):
-        toml = (WORKER / "wrangler.toml").read_text()
-        assert re.search(r'^PRODUCTION_ENABLED = "false"$', toml, re.M)
-        assert re.search(r'^PRODUCTION_CRONS = ""$', toml, re.M)
+class TestProductionConfig:
+    """Pins EXACTLY the production configuration approved in Addendum I.4.
+    Any other schedule or flag change fails the build until reviewed."""
 
-    def test_no_production_cron_scheduled_on_cloudflare(self):
-        toml = (WORKER / "wrangler.toml").read_text()
-        crons = re.findall(r'^crons = \[(.*)\]$', toml, re.M)
+    APPROVED_TEST_CRON = "37 4 * * *"
+    APPROVED_PROD_CRON = "*/15 11-14 * * 1-5"
+
+    def _toml(self):
+        return (WORKER / "wrangler.toml").read_text()
+
+    def test_production_enabled_with_the_approved_cron_only(self):
+        toml = self._toml()
+        assert re.search(r'^PRODUCTION_ENABLED = "true"$', toml, re.M)
+        assert re.search(rf'^PRODUCTION_CRONS = "{re.escape(self.APPROVED_PROD_CRON)}"$', toml, re.M)
+
+    def test_cloudflare_triggers_are_exactly_test_plus_production(self):
+        crons = re.findall(r'^crons = \[(.*)\]$', self._toml(), re.M)
         assert len(crons) == 1
-        for prod in PRODUCTION_CRONS:
-            assert prod not in crons[0]
+        assert re.findall(r'"([^"]+)"', crons[0]) == [self.APPROVED_TEST_CRON, self.APPROVED_PROD_CRON]
+
+    def test_production_window_is_weekdays_after_the_close(self):
+        minute, hours, dom, month, dow = self.APPROVED_PROD_CRON.split()
+        assert (dom, month, dow) == ("*", "*", "1-5")
+        first_hour = int(hours.split("-")[0])
+        assert first_hour * 60 > 10 * 60, "15:30 IST close = 10:00 UTC"
 
     def test_test_cron_is_at_most_daily(self):
         """Safe test schedule: fixed minute and hour, so at most once a day."""
-        toml = (WORKER / "wrangler.toml").read_text()
-        for cron in re.findall(r'"([^"]+)"', re.findall(r'^crons = \[(.*)\]$', toml, re.M)[0]):
-            minute, hour = cron.split()[:2]
-            assert minute.isdigit() and hour.isdigit(), cron
+        minute, hour = self.APPROVED_TEST_CRON.split()[:2]
+        assert minute.isdigit() and hour.isdigit()
+
+    def test_readiness_final_window_inside_the_production_window(self):
+        m = re.search(r'^READINESS_FINAL_UTC = "(\d\d):(\d\d)"$', self._toml(), re.M)
+        assert m and (int(m.group(1)), int(m.group(2))) == (14, 45)
+
+    def test_cloudflare_does_not_duplicate_the_github_fallback_time(self):
+        for github_cron in GITHUB_FALLBACK_CRONS:
+            assert github_cron not in self._toml()
 
 
 class TestWorkerCannotReachData:
@@ -145,7 +164,53 @@ class TestDailyWorkflowTagging:
         steps = text[text.index("steps:"):]
         assert "inputs.request_id" not in steps and "inputs.trade_date" not in steps
 
-    def test_github_schedule_unchanged_in_this_phase(self):
-        """Changing GitHub's own schedule is a separate, approved decision."""
+    def test_github_schedule_is_only_the_approved_fallback(self):
+        """Approved in Addendum I.4: 41 11 removed, 17 14 (14:17 UTC) kept."""
         crons = re.findall(r"^\s*-\s*cron:\s*'([^']+)'", self.WF.read_text(), re.M)
-        assert crons == ["41 11 * * 1-5", "17 14 * * 1-5"]
+        assert crons == ["17 14 * * 1-5"]
+
+
+class TestGithubFallbackStep:
+    WF = WORKFLOWS / "daily-data-update.yml"
+
+    def _steps(self):
+        text = self.WF.read_text()
+        return text[text.index("    steps:"):]
+
+    def test_fallback_check_is_the_first_step_and_schedule_only(self):
+        steps = self._steps()
+        first = steps.index("      - ")
+        assert steps[first:].startswith("      - name: Fallback only - skip if Cloudflare already loaded today")
+        block = steps[first:steps.index("      - uses: actions/checkout@v4")]
+        assert "if: github.event_name == 'schedule'" in block
+        assert "id: fallback" in block
+
+    def test_fallback_uses_the_utc_date_not_ist(self):
+        """The fallback lands ~18:30 UTC, which is already tomorrow in IST."""
+        steps = self._steps()
+        assert "day=$(date -u +%Y-%m-%d)" in steps
+        assert "Asia/Kolkata" not in steps
+
+    def test_fallback_counts_only_successful_cloudflare_runs_for_the_day(self):
+        steps = self._steps()
+        assert "-f status=success" in steps and "-f event=workflow_dispatch" in steps
+        assert 'contains(\\"cloudflare $day\\")' in steps
+
+    def test_every_pipeline_step_is_gated_by_the_fallback(self):
+        steps = self._steps()
+        body = steps[steps.index("      - uses: actions/checkout@v4"):steps.index("      - name: Report failure")]
+        items = re.split(r"\n(?=      - )", body.strip("\n"))
+        assert len(items) == 5
+        for item in items:
+            assert "if: steps.fallback.outputs.skip != 'true'" in item, item.splitlines()[0]
+
+    def test_fallback_token_is_read_only(self):
+        text = self.WF.read_text()
+        perms = text[text.index("permissions:"):text.index("jobs:")]
+        assert re.findall(r"^  (\w+): (\w+)", perms, re.M) == [("contents", "read"), ("actions", "read")]
+
+    def test_repository_name_reaches_the_shell_only_via_env(self):
+        steps = self._steps()
+        fallback = steps[:steps.index("      - uses: actions/checkout@v4")]
+        run = fallback[fallback.index("run: |"):]
+        assert "${{" not in run

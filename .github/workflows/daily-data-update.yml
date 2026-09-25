@@ -1,20 +1,18 @@
 name: Daily data update
 
+# PRIMARY trigger: the Cloudflare Worker (cloudflare/dispatcher), every 15
+# min 11:00-14:45 UTC on weekdays, dispatching this workflow only once NSE
+# has published the day's file (readiness gate) and no run for the day
+# exists yet (duplicate protection).
+#
+# FALLBACK: GitHub's own schedule, 14:17 UTC on weekdays. Measured 250-288
+# min late, so it lands ~18:30 UTC. Its first step exits without touching
+# anything if a Cloudflare run for the day already succeeded, so it only does
+# work when Cloudflare did not (e.g. an expired dispatch token). It needs no
+# Cloudflare credentials, which is why it is kept.
+#
 # Scheduled runs only fire for workflow files on the default branch.
 # India observes no DST, so the +5:30 offset is stable year-round.
-#
-# Two fires per trading day, both idempotent, so the second costs nothing
-# when the first already succeeded:
-#
-#   11:41 UTC = 17:11 IST - 101 min after the 15:30 IST close. The bhavcopy
-#     is normally published by then. If the delivery file is not, the day is
-#     recorded 'partial' and the later run enriches it.
-#   14:17 UTC = 19:47 IST - safety net, by which point sec_bhavdata_full is
-#     reliably available. Also covers a missed or heavily delayed first fire.
-#
-# Neither is on the hour. The previous schedule used minute 0 and was observed
-# firing 4h48m late on 2026-09-23; GitHub's own guidance is that :00 is the
-# worst minute to pick, which the earlier schedule ignored.
 # Run names identify the trigger in the Actions list:
 #   "Daily data update (cloudflare 2026-09-25 <request id>)"  Cloudflare Worker
 #   "Daily data update (schedule)"                            GitHub's own cron
@@ -28,7 +26,6 @@ run-name: >-
 
 on:
   schedule:
-    - cron: '41 11 * * 1-5'
     - cron: '17 14 * * 1-5'
   workflow_dispatch:
     inputs:
@@ -60,27 +57,56 @@ concurrency:
 
 permissions:
   contents: read
+  actions: read   # fallback step reads today's runs; cannot dispatch or write
 
 jobs:
   update:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
+      # GitHub's schedule is now only a FALLBACK behind the Cloudflare
+      # Worker. If a Cloudflare-dispatched run for today already succeeded,
+      # this scheduled run stops here and touches nothing.
+      - name: Fallback only - skip if Cloudflare already loaded today
+        id: fallback
+        if: github.event_name == 'schedule'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          # UTC date, NOT IST: this fire lands ~18:30 UTC, already tomorrow in IST.
+          day=$(date -u +%Y-%m-%d)
+          n=$(gh api -X GET "repos/$REPO/actions/workflows/daily-data-update.yml/runs" \
+                -f event=workflow_dispatch -f status=success -f created=">=$day" -f per_page=50 \
+                --jq "[.workflow_runs[] | select(.display_title | contains(\"cloudflare $day\"))] | length")
+          if [ "$n" -gt 0 ]; then
+            echo "Cloudflare already loaded $day ($n successful run(s)); fallback not needed."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "No successful Cloudflare run for $day; fallback runs the pipeline."
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - uses: actions/checkout@v4
+        if: steps.fallback.outputs.skip != 'true'
 
       - uses: actions/setup-python@v5
+        if: steps.fallback.outputs.skip != 'true'
         with:
           python-version: '3.11'
 
       - name: Install dependencies
+        if: steps.fallback.outputs.skip != 'true'
         run: pip install -r requirements.txt
 
       - name: Check connection
+        if: steps.fallback.outputs.skip != 'true'
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
         run: python3 scripts/check_connection.py
 
       - name: Run data update
+        if: steps.fallback.outputs.skip != 'true'
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           UPSTOX_ANALYTICS_TOKEN: ${{ secrets.UPSTOX_ANALYTICS_TOKEN }}

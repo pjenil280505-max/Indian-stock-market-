@@ -1,4 +1,5 @@
-# Cloudflare Worker: Cron -> GitHub workflow_dispatch. Phase 1b: TEST ONLY.
+# Cloudflare Worker: Cron -> GitHub workflow_dispatch. PRODUCTION (data
+# collection only), approved in docs/PHASE_1_REPORT.md Addendum I.4.
 #
 # No secrets live in this file. The Worker's two secrets are uploaded at
 # deploy time by .github/workflows/cloudflare-worker.yml from GitHub Secrets:
@@ -15,23 +16,25 @@ workers_dev = true
 preview_urls = false
 
 [triggers]
-# TEST schedule, UTC: once a day at 04:37 (10:07 IST, during market hours,
-# deliberately unlike the production 11:41/14:17 fires). Each fire dispatches
-# only the no-op probe workflow, which records how late GitHub starts it.
-crons = ["37 4 * * *"]
+# All UTC.
+#   37 4 * * *          TEST: once a day, dispatches only the no-op probe.
+#   */15 11-14 * * 1-5  PRODUCTION: every 15 min 11:00-14:45 on weekdays;
+#                       each fire passes the readiness gate before it can
+#                       dispatch daily-data-update.yml (at most once a day).
+crons = ["37 4 * * *", "*/15 11-14 * * 1-5"]
 
 [vars]
 GITHUB_OWNER = "pjenil280505-max"
 GITHUB_REPO = "Indian-stock-market-"
 GITHUB_REF = "main"
 TEST_CRONS = "37 4 * * *"
-# Production is OFF. Enabling it needs BOTH of these changed, a cron added to
-# [triggers], and a reviewed commit - see cloudflare/dispatcher/README.md.
-PRODUCTION_CRONS = ""
-PRODUCTION_ENABLED = "false"
+# Production needs BOTH of these AND the cron in [triggers]; the exact values
+# are pinned by tests/test_cloudflare_guards.py::TestProductionConfig.
+PRODUCTION_CRONS = "*/15 11-14 * * 1-5"
+PRODUCTION_ENABLED = "true"
 # Readiness gate (src/readiness.js), used only by production fires: from this
 # UTC time a UDiFF-only day is accepted as "partial" instead of waiting for
-# the delivery file. Inert while production is off.
+# the delivery file.
 READINESS_FINAL_UTC = "14:45"
 
 [observability]

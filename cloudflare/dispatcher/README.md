@@ -4,16 +4,18 @@ Cloudflare Cron → this Worker → GitHub `workflow_dispatch` → existing Pyth
 pipeline on GitHub runners → Neon.
 
 The Worker is **a trigger only**. It holds no data, never connects to Neon or
-NSE, and runs no pipeline code. Its one outbound request is a POST to the
-GitHub API.
+Upstox, and runs no pipeline code. Outbound: the GitHub API (read today's
+runs; dispatch) and GETs of the allowlisted NSE files for the readiness gate.
 
-## Phase 1b state: TEST ONLY
+## State: PRODUCTION (data collection only), approved in Addendum I.4
 
 | | Setting | Effect |
 |---|---|---|
-| Cron | `37 4 * * *` (04:37 UTC daily) | Dispatches the **no-op probe** workflow |
-| `PRODUCTION_ENABLED` | `"false"` | `daily-data-update.yml` cannot be dispatched |
-| `PRODUCTION_CRONS` | `""` | No cron is treated as production |
+| Test cron | `37 4 * * *` (04:37 UTC daily) | Dispatches the **no-op probe** workflow |
+| Production cron | `*/15 11-14 * * 1-5` (11:00–14:45 UTC, weekdays) | Readiness gate, then `daily-data-update.yml` at most once per day |
+| `PRODUCTION_ENABLED` | `"true"` | |
+| `READINESS_FINAL_UTC` | `"14:45"` | From here a UDiFF-only day is accepted as partial |
+| GitHub fallback | `17 14 * * 1-5` (14:17 UTC) in `daily-data-update.yml` | Exits immediately if today's Cloudflare run succeeded |
 
 Invocation kinds:
 

@@ -65,13 +65,15 @@ test("a production cron is blocked unless production is explicitly enabled", () 
   assert.equal(classify("41 11 * * 1-5", { ...env, PRODUCTION_ENABLED: "true" }).kind, "production");
 });
 
-test("the committed wrangler.toml keeps production off and uses a test cron", () => {
+test("the committed wrangler.toml has exactly the approved production config", () => {
   const toml = readFileSync(new URL("../wrangler.toml", import.meta.url), "utf8");
-  assert.match(toml, /^PRODUCTION_ENABLED = "false"$/m);
-  assert.match(toml, /^PRODUCTION_CRONS = ""$/m);
+  assert.match(toml, /^PRODUCTION_ENABLED = "true"$/m);
+  assert.match(toml, /^PRODUCTION_CRONS = "\*\/15 11-14 \* \* 1-5"$/m);
   const crons = [...toml.matchAll(/^crons = \[(.*)\]$/gm)].map((m) => m[1]);
-  assert.equal(crons.length, 1);
-  assert.ok(!/41 11|17 14/.test(crons[0]), "production schedule must not be configured");
+  assert.deepEqual(crons, ['"37 4 * * *", "*/15 11-14 * * 1-5"']);
+  const env = { PRODUCTION_CRONS: "*/15 11-14 * * 1-5", PRODUCTION_ENABLED: "true", TEST_CRONS: "37 4 * * *" };
+  assert.equal(classify("*/15 11-14 * * 1-5", env).kind, "production");
+  assert.equal(classify("37 4 * * *", env).kind, "test");
 });
 
 // ---- request shape -------------------------------------------------------

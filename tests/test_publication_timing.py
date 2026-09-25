@@ -116,8 +116,10 @@ class TestCronSchedule:
                 / ".github/workflows/daily-data-update.yml").read_text()
         return re.findall(r"^\s*-\s*cron:\s*'([^']+)'", text, re.MULTILINE)
 
-    def test_two_fires_per_trading_day(self):
-        assert len(self._crons()) == 2
+    def test_single_github_fallback_fire(self):
+        """Cloudflare is the primary scheduler (Addendum I.4); GitHub keeps
+        one late fallback fire."""
+        assert self._crons() == ["17 14 * * 1-5"]
 
     def test_never_on_the_top_of_the_hour(self):
         """GitHub delays scheduled runs worst at :00; a 4h48m delay was
@@ -135,6 +137,8 @@ class TestCronSchedule:
             minute, hour = int(cron.split()[0]), int(cron.split()[1])
             assert hour * 60 + minute > 10 * 60, f"{cron} is before the close"
 
-    def test_fires_are_separated_enough_to_enrich(self):
-        times = sorted(int(c.split()[1]) * 60 + int(c.split()[0]) for c in self._crons())
-        assert times[1] - times[0] >= 120, "safety net too close to the first attempt"
+    def test_fallback_is_after_delivery_publication(self):
+        """Delivery data publishes ~11:31 UTC; the fallback must not precede it."""
+        for cron in self._crons():
+            minute, hour = int(cron.split()[0]), int(cron.split()[1])
+            assert hour * 60 + minute >= 11 * 60 + 31
