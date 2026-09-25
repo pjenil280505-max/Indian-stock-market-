@@ -756,3 +756,38 @@ Worker's own responses.
 The test cron fires once a day at 04:37 UTC and dispatches only the no-op probe. It costs
 about 10 s of Actions time per day and builds a daily record of Cloudflare → GitHub latency.
 Production dispatch stays disabled until it is explicitly approved.
+
+---
+
+# Addendum H — Cloudflare → NSE connectivity test (2026-09-25)
+
+Read-only. One GET per resource from the **deployed** Worker, and the same GETs from a
+GitHub runner for comparison (Actions run 36116297925, 09:03–09:04 UTC, during market
+hours). Nothing was stored, no workflow was dispatched, and Neon and Upstox were not
+contacted. The production flags and `wrangler.toml` are unchanged.
+
+| # | Resource | Cloudflare status | CF ms | Bytes | Payload check | GitHub status | GH ms |
+|---|---|---|---|---|---|---|---|
+| 1 | `EQUITY_L.csv` (universe) | 200 | 319 | 182,582 | CSV header OK, **2,585 rows** (= Neon `symbols`) | 200 | 665 |
+| 2 | `sec_bhavdata_full_24092026.csv` | 200 | 250 | 395,867 | header incl. `DELIV_QTY, DELIV_PER`, 3,492 rows | 200 | 257 |
+| 3 | UDiFF `…20260924_F_0000.csv.zip` | 200 | 355 | 203,837 | valid ZIP, entry `BhavCopy_NSE_CM_0_0_0_20260924_F_0000.csv`, CSV header decompressed | 200 | 253 |
+| 4 | `api/corporates-corporateActions` | 200 | 415 | 869 | JSON array, 3 records | 200 | 270 |
+| 5 | `sec_bhavdata_full_25092026.csv` (today, not yet published) | 404 | 335 | 3,533 | HTML "not found" page, correctly **not** flagged as blocked | 404 | 279 |
+
+- Every response from both origins carried `server: cloudflare`. NSE's archives and API are
+  currently served through Cloudflare, not Akamai, so the Phase 0 concern about Akamai
+  challenging Worker egress did not apply to these endpoints on this date.
+- No challenge page, 403, 429 or redirect occurred.
+- **Caveats.** This was one sample per resource. The probe ran in Cloudflare colo **SJC**
+  because the HTTP caller was a US GitHub runner; cron-triggered invocations run where
+  Cloudflare places them, so their latency may differ. In Workers, `Date.now()` advances
+  only on I/O, so the "headers" and "total" timings are I/O-bound measurements rather than a
+  true TTFB. NSE can change its bot rules at any time, and Worker subrequests identify
+  themselves through Cloudflare's `CF-Worker` header.
+- A live check in the Workers runtime found a ZIP bug that the Node unit tests missed:
+  workerd rejects trailing bytes after the deflate stream. It was fixed before deployment,
+  and a test now uses a real archive layout.
+
+Neon fingerprint: identical before (run 36116259457) and after (run 36116431702), matching
+every Phase 1a/1b fingerprint. No data workflow ran: the daily update is still at 10 runs,
+the backfill at 2, and the probe at 3.
