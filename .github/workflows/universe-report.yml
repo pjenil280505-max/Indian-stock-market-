@@ -1,0 +1,48 @@
+name: Universe report (read-only)
+
+# Explains universe_membership changes between two observations. The script
+# opens a READ-ONLY connection, so it cannot write. Shares the writer lock
+# only so it never reads mid-write.
+on:
+  workflow_dispatch:
+    inputs:
+      since:
+        description: 'Intervals opened on/after (YYYY-MM-DD); blank = latest observation'
+        required: false
+        default: ''
+      previous:
+        description: 'Previous observation date (YYYY-MM-DD); blank = inferred'
+        required: false
+        default: ''
+
+concurrency:
+  group: database-writer
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Universe report
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          SINCE: ${{ inputs.since }}
+          PREVIOUS: ${{ inputs.previous }}
+        run: |
+          args=()
+          [[ "$SINCE" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] && args+=(--since "$SINCE")
+          [[ "$PREVIOUS" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] && args+=(--previous "$PREVIOUS")
+          python3 scripts/universe_report.py "${args[@]}"
