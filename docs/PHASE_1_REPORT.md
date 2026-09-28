@@ -774,9 +774,11 @@ contacted. The production flags and `wrangler.toml` are unchanged.
 | 4 | `api/corporates-corporateActions` | 200 | 415 | 869 | JSON array, 3 records | 200 | 270 |
 | 5 | `sec_bhavdata_full_25092026.csv` (today, not yet published) | 404 | 335 | 3,533 | HTML "not found" page, correctly **not** flagged as blocked | 404 | 279 |
 
-- Every response from both origins carried `server: cloudflare`. NSE's archives and API are
-  currently served through Cloudflare, not Akamai, so the Phase 0 concern about Akamai
-  challenging Worker egress did not apply to these endpoints on this date.
+- ~~Every response from both origins carried `server: cloudflare`…~~ **Corrected
+  2026-09-28 (Addendum J.2):** only the Worker side recorded a `server` header; the GitHub side
+  never captured it, so "both origins" was an overclaim. On 2026-09-28 NSE served an **Akamai**
+  "Access Denied" page (`errors.edgesuite.net`) to a different egress. The Akamai risk is not
+  retired.
 - No challenge page, 403, 429 or redirect occurred.
 - **Caveats.** This was one sample per resource. The probe ran in Cloudflare colo **SJC**
   because the HTTP caller was a US GitHub runner; cron-triggered invocations run where
@@ -907,3 +909,42 @@ production is on or the schedule changes:
 - `tests/test_publication_timing.py`: `test_two_fires_per_trading_day` and
   `test_fires_are_separated_enough_to_enrich`
 - `cloudflare/dispatcher/test/index.test.js`: "the committed wrangler.toml keeps production off"
+
+
+---
+
+# Addendum J — First production run, universe jump explained, one correction (2026-09-28)
+
+## J.1 First production run
+
+The Cloudflare 11:30 UTC fire dispatched run **36416125074**, titled `Daily data update
+(cloudflare 2026-09-28 365bf531-…)`. It finished at 11:31:35 UTC, loaded 2026-09-28 **complete**
+(delivery file present), wrote 2,595 bars and halted nothing. It was the only Cloudflare-tagged run
+across all 16 fires. `daily_bars_raw` went from 1,607,721 to 1,610,316, exactly +2,595 (migrate
+status run 36440398518).
+
+The same load changed the universe: `symbols` +16 and `universe_membership` +35 since
+Friday. A read-only report (`scripts/universe_report.py`, run 36442550897) explains it:
+
+| Kind | Count | Meaning |
+|---|---|---|
+| series_change | 19 | EQ↔BE moves (e.g. ALMONDZ, ISFT, MANUGRAPH, VISAKAIND to BE; CHEMCON, SHEMAROO, SUNDRMBRAK back to EQ). The old interval closed on 2026-09-25 and a new one opened on 2026-09-28. Exactly the 19 closed intervals reappear. |
+| new_symbol | 16 | ISINs never seen before, **all with old listing dates** (1995–2026) and mostly series BZ (8) or BE (6): existing companies newly present in NSE's equity list, not IPOs |
+| gap_relist | 0 | |
+| **SUSPECT_SPLIT** | **0** | no interval was split where it should have been extended |
+
+The universe went from 2,585 on 2026-09-25 to 2,601 on 2026-09-28: +16, and no symbol vanished
+without reappearing. The numbers reconcile exactly: 35 new intervals = 16 new ISINs + 19
+series changes.
+
+**What is inferred, not verified:** why NSE moved these securities. Periodic EQ↔BE
+(trade-for-trade) reclassification and resumed trading of previously suspended securities
+(typical of BZ) fit the pattern, but no NSE circular was checked.
+
+Side note: the report's `first_seen` column shows each symbol's listing date. The field is
+populated from `DATE OF LISTING`, not from the first observation date.
+
+## J.2 Correction to Addendum H
+
+See the struck-through bullet in H. NSE's CDN is not reliably Cloudflare, and the Akamai
+challenge risk to any non-GitHub egress remains open.
