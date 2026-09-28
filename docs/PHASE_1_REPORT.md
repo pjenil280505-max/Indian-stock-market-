@@ -948,3 +948,25 @@ populated from `DATE OF LISTING`, not from the first observation date.
 
 See the struck-through bullet in H. NSE's CDN is not reliably Cloudflare, and the Akamai
 challenge risk to any non-GitHub egress remains open.
+
+## J.3 Fallback skip path verified — Phase 1 production complete
+
+GitHub's fallback (14:17 cron) arrived at **20:35:44 UTC, 378 minutes late**, the longest delay
+measured so far. It ran as run 36480313141. The fallback step found the successful Cloudflare run
+and printed "Cloudflare already loaded 2026-09-28 (1 successful run(s)); fallback not needed."
+All five pipeline steps were **skipped**: no checkout, no database connection, no load. The job
+took 5 seconds. Neon was unchanged: migrate status run 36489969946 matched check 2/3 on all three
+digests (`daily_bars_raw` 1,610,316, digest 489343454562).
+
+Every production path is now verified live:
+
+| Path | Run |
+|---|---|
+| Cloudflare gate → dispatch → complete load | 36416125074 (2026-09-28) |
+| Duplicate protection (16 fires → 1 run) | 2026-09-28 |
+| GitHub fallback runs when Cloudflare didn't | 36175110042 (2026-09-25) |
+| GitHub fallback skips when Cloudflare did | 36480313141 (2026-09-28) |
+
+Watch item: the fallback's UTC-date check would roll to the next day if GitHub ever delayed a
+run past 00:00 UTC (~9.7 h). The run would then do a safe, idempotent pipeline load instead
+of skipping.
