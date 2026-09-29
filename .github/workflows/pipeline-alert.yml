@@ -1,0 +1,55 @@
+name: Pipeline alert
+
+# Phase 1.1. Opens (or comments on) a GitHub Issue for a pipeline problem;
+# GitHub emails the repository owner, who is @mentioned. Dispatched by the
+# Cloudflare Worker, and run directly by data-freshness.yml's logic.
+#
+# No secrets and no database access: the built-in token with issues: write
+# is the only credential. Inputs reach the shell only via env vars and are
+# validated by scripts/raise_alert.sh.
+run-name: "Pipeline alert (${{ inputs.kind }} ${{ inputs.trade_date }})"
+
+on:
+  workflow_dispatch:
+    inputs:
+      kind:
+        description: 'Alert kind'
+        required: true
+        type: choice
+        options: [nse_blocked, stale_dispatched, dispatch_failed, token_expiring, github_unreadable, test_alert]
+      trade_date:
+        description: 'Trade date the alert is about (YYYY-MM-DD)'
+        required: true
+      detail:
+        description: 'One-line detail'
+        required: false
+        default: ''
+      request_id:
+        description: 'Worker request id'
+        required: false
+        default: ''
+
+# Deliberately NO concurrency group: a group keeps one pending run and cancels
+# older pending ones, which could silently drop an alert.
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  alert:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Open or update the alert issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ALERT_KIND: ${{ inputs.kind }}
+          ALERT_DATE: ${{ inputs.trade_date }}
+          ALERT_DETAIL: ${{ inputs.detail }}
+          ALERT_REQUEST_ID: ${{ inputs.request_id }}
+          ALERT_OWNER: ${{ github.repository_owner }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: scripts/raise_alert.sh

@@ -1,0 +1,64 @@
+name: Data freshness check
+
+# Phase 1.1. An independent check that every published trading day is loaded
+# in Neon. Depends on neither Cloudflare nor the dispatch token, so it still
+# works when the primary collector is broken.
+#
+# Runs on GitHub's schedule, which is hours late - acceptable here: this is
+# a next-morning safety net, not the collector. Read-only database access.
+on:
+  schedule:
+    - cron: '23 3 * * 2-6'   # 03:23 UTC Tue-Sat: covers up to the previous weekday
+  workflow_dispatch:
+
+# Read-only, so it does not take the database-writer lock: taking it would
+# let this run cancel a PENDING daily run (a group keeps one pending run).
+# Postgres gives a consistent snapshot without the lock.
+concurrency:
+  group: data-freshness
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Freshness check (read-only)
+        id: fresh
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: |
+          set +e
+          python3 scripts/freshness_check.py | tee "$RUNNER_TEMP/fresh.txt"
+          code=${PIPESTATUS[0]}
+          set -e
+          echo "code=$code" >> "$GITHUB_OUTPUT"
+          first=$(grep -m1 -oE '^(STALE|UNVERIFIED) [0-9]{4}-[0-9]{2}-[0-9]{2}' "$RUNNER_TEMP/fresh.txt" | cut -d' ' -f2 || true)
+          echo "date=${first:-$(date -u +%Y-%m-%d)}" >> "$GITHUB_OUTPUT"
+          summary=$(grep -E '^(STALE|UNVERIFIED) ' "$RUNNER_TEMP/fresh.txt" | tr '\n' ';' | cut -c1-280 || true)
+          echo "summary=$summary" >> "$GITHUB_OUTPUT"
+          [ "$code" = 0 ]
+
+      - name: Alert
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ALERT_KIND: ${{ steps.fresh.outputs.code == '7' && 'stale_data' || 'check_failed' }}
+          ALERT_DATE: ${{ steps.fresh.outputs.date }}
+          ALERT_DETAIL: ${{ steps.fresh.outputs.summary }}
+          ALERT_OWNER: ${{ github.repository_owner }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: ALERT_DATE="${ALERT_DATE:-$(date -u +%Y-%m-%d)}" scripts/raise_alert.sh

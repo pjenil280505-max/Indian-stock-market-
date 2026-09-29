@@ -21,7 +21,10 @@ preview_urls = false
 #   */15 11-14 * * 1-5  PRODUCTION: every 15 min 11:00-14:45 on weekdays;
 #                       each fire passes the readiness gate before it can
 #                       dispatch daily-data-update.yml (at most once a day).
-crons = ["37 4 * * *", "*/15 11-14 * * 1-5"]
+#   5 15 * * 1-5        STALENESS (Phase 1.1): after the window; if today did
+#                       not load, ONE emergency dispatch + a GitHub Issue alert.
+#                       Also warns before the dispatch token expires.
+crons = ["37 4 * * *", "*/15 11-14 * * 1-5", "5 15 * * 1-5"]
 
 [vars]
 GITHUB_OWNER = "pjenil280505-max"
@@ -36,6 +39,13 @@ PRODUCTION_ENABLED = "true"
 # UTC time a UDiFF-only day is accepted as "partial" instead of waiting for
 # the delivery file.
 READINESS_FINAL_UTC = "14:45"
+# Phase 1.1. From this UTC time, if NSE is UNREACHABLE from Cloudflare
+# (403/429/5xx/network - not a 404), dispatch anyway: GitHub's runners fetch
+# NSE themselves. Remove this line to restore Phase 1 behaviour.
+BLOCKED_DISPATCH_AFTER_UTC = "12:00"
+# Phase 1.1 staleness check (src/monitor.js) and token-expiry warning days.
+STALENESS_CRONS = "5 15 * * 1-5"
+TOKEN_WARN_DAYS = "14,7,3,1"
 
 [observability]
 enabled = true

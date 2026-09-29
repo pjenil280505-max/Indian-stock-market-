@@ -26,6 +26,7 @@ class TestProductionConfig:
 
     APPROVED_TEST_CRON = "37 4 * * *"
     APPROVED_PROD_CRON = "*/15 11-14 * * 1-5"
+    APPROVED_STALENESS_CRON = "5 15 * * 1-5"  # Phase 1.1
 
     def _toml(self):
         return (WORKER / "wrangler.toml").read_text()
@@ -35,10 +36,23 @@ class TestProductionConfig:
         assert re.search(r'^PRODUCTION_ENABLED = "true"$', toml, re.M)
         assert re.search(rf'^PRODUCTION_CRONS = "{re.escape(self.APPROVED_PROD_CRON)}"$', toml, re.M)
 
-    def test_cloudflare_triggers_are_exactly_test_plus_production(self):
+    def test_cloudflare_triggers_are_exactly_test_production_staleness(self):
         crons = re.findall(r'^crons = \[(.*)\]$', self._toml(), re.M)
         assert len(crons) == 1
-        assert re.findall(r'"([^"]+)"', crons[0]) == [self.APPROVED_TEST_CRON, self.APPROVED_PROD_CRON]
+        assert re.findall(r'"([^"]+)"', crons[0]) == [
+            self.APPROVED_TEST_CRON, self.APPROVED_PROD_CRON, self.APPROVED_STALENESS_CRON,
+        ]
+        assert len(re.findall(r'"([^"]+)"', crons[0])) <= 5, "Cloudflare free plan: 5 cron triggers"
+
+    def test_phase11_settings_are_pinned(self):
+        toml = self._toml()
+        assert re.search(rf'^STALENESS_CRONS = "{re.escape(self.APPROVED_STALENESS_CRON)}"$', toml, re.M)
+        assert re.search(r'^BLOCKED_DISPATCH_AFTER_UTC = "12:00"$', toml, re.M)
+        assert re.search(r'^TOKEN_WARN_DAYS = "14,7,3,1"$', toml, re.M)
+
+    def test_staleness_check_runs_after_the_production_window(self):
+        minute, hour = map(int, self.APPROVED_STALENESS_CRON.split()[:2])
+        assert hour * 60 + minute > 14 * 60 + 45
 
     def test_production_window_is_weekdays_after_the_close(self):
         minute, hours, dom, month, dow = self.APPROVED_PROD_CRON.split()
@@ -87,7 +101,7 @@ class TestWorkerCannotReachData:
     def test_only_worker_src_files_are_known(self):
         """A new source file must be reviewed against these guards."""
         names = sorted(p.name for p in (WORKER / "src").glob("*.js"))
-        assert names == ["index.js", "nse_probe.js", "readiness.js"]
+        assert names == ["index.js", "monitor.js", "nse_probe.js", "readiness.js"]
 
     def test_readiness_gate_is_read_only(self):
         """The gate observes GitHub and NSE; it never POSTs or dispatches."""
@@ -98,10 +112,18 @@ class TestWorkerCannotReachData:
         for needle in ("DATABASE_URL", "neon", "postgres", "upstox"):
             assert needle not in src.lower()
 
-    def test_only_two_workflows_targetable(self):
+    def test_only_three_workflows_targetable(self):
+        """Probe, daily pipeline and (Phase 1.1) the alert workflow. Never
+        migrations or backfill."""
         src = (WORKER / "src" / "index.js").read_text()
         targets = set(re.findall(r'"([a-z0-9-]+\.yml)"', src))
-        assert targets == {"cloudflare-dispatch-probe.yml", "daily-data-update.yml"}
+        assert targets == {"cloudflare-dispatch-probe.yml", "daily-data-update.yml", "pipeline-alert.yml"}
+
+    def test_monitor_is_read_only_and_data_free(self):
+        src = (WORKER / "src" / "monitor.js").read_text()
+        code = "\n".join(l for l in src.splitlines() if not l.strip().startswith("//")).lower()
+        for needle in ("database_url", "neon", "postgres", "upstox", "/dispatches", "method:"):
+            assert needle not in code, needle
 
     def test_cloudflare_workflows_never_get_database_url(self):
         for name in ("cloudflare-worker.yml", "cloudflare-dispatch-probe.yml"):
@@ -214,3 +236,33 @@ class TestGithubFallbackStep:
         fallback = steps[:steps.index("      - uses: actions/checkout@v4")]
         run = fallback[fallback.index("run: |"):]
         assert "${{" not in run
+
+
+class TestPhase11Workflows:
+    """The alert and freshness workflows get the narrowest possible rights."""
+
+    def _perms(self, name):
+        text = (WORKFLOWS / name).read_text()
+        block = text[text.index("\npermissions:"):text.index("\njobs:")]
+        return re.findall(r"^  (\w+): (\w+)", block, re.M)
+
+    def test_alert_workflow_can_only_write_issues(self):
+        assert self._perms("pipeline-alert.yml") == [("contents", "read"), ("issues", "write")]
+        text = (WORKFLOWS / "pipeline-alert.yml").read_text()
+        assert "secrets." not in text, "no secrets at all; only the built-in token"
+
+    def test_alert_workflow_has_no_concurrency_group(self):
+        """A group keeps one pending run and cancels older pending ones -
+        that would silently drop alerts."""
+        assert not re.search(r"^concurrency:", (WORKFLOWS / "pipeline-alert.yml").read_text(), re.M)
+
+    def test_freshness_workflow_rights(self):
+        assert self._perms("data-freshness.yml") == [("contents", "read"), ("issues", "write")]
+        text = (WORKFLOWS / "data-freshness.yml").read_text()
+        assert set(re.findall(r"secrets\.([A-Z_]+)", text)) == {"DATABASE_URL"}
+
+    def test_workflow_inputs_reach_the_shell_only_via_env(self):
+        text = (WORKFLOWS / "pipeline-alert.yml").read_text()
+        steps = text[text.index("steps:"):]
+        run_lines = [l for l in steps.splitlines() if l.strip().startswith("run:")]
+        assert run_lines and all("${{" not in l for l in run_lines)

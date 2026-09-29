@@ -21,11 +21,13 @@
 // `scheduledTime` is a UTC epoch; the trade date is derived in IST.
 
 import { probe, resolveTarget } from "./nse_probe.js";
+import { ALERT_KINDS, checkStaleness } from "./monitor.js";
 import { evaluate, runTag } from "./readiness.js";
 
 export const WORKFLOWS = Object.freeze({
   test: "cloudflare-dispatch-probe.yml",
   production: "daily-data-update.yml",
+  alert: "pipeline-alert.yml", // Phase 1.1: opens/updates a GitHub Issue
 });
 
 const GITHUB_API = "https://api.github.com";
@@ -50,6 +52,12 @@ export function classify(cron, env) {
   if (list(env.TEST_CRONS).includes(cron)) {
     return { kind: "test" };
   }
+  if (list(env.STALENESS_CRONS).includes(cron)) {
+    // The staleness check can dispatch the real pipeline, so it is gated by
+    // the same production switch.
+    if (env.PRODUCTION_ENABLED === "true") return { kind: "staleness" };
+    return { kind: "blocked", reason: "production dispatch is disabled" };
+  }
   return { kind: "ignored", reason: "cron not configured for any invocation kind" };
 }
 
@@ -67,21 +75,41 @@ export function buildDispatch(kind, meta, env) {
 
   // Inputs must match the target workflow's declared inputs exactly, or
   // GitHub rejects the dispatch with 422.
-  const inputs =
-    kind === "test"
-      ? {
-          invocation: "test",
-          cron: meta.cron,
-          scheduled_time: meta.scheduledTime,
-          request_id: meta.requestId,
-        }
-      : {
-          catchup_days: "10",
-          request_id: meta.requestId,
-          trade_date: meta.tradeDate,
-        };
+  let inputs;
+  if (kind === "test") {
+    inputs = {
+      invocation: "test",
+      cron: meta.cron,
+      scheduled_time: meta.scheduledTime,
+      request_id: meta.requestId,
+    };
+  } else if (kind === "alert") {
+    if (!ALERT_KINDS.includes(meta.alertKind)) throw new Error(`unknown alert kind ${JSON.stringify(meta.alertKind)}`);
+    inputs = {
+      kind: meta.alertKind,
+      trade_date: meta.tradeDate,
+      detail: cleanDetail(meta.detail),
+      request_id: meta.requestId,
+    };
+  } else {
+    inputs = {
+      catchup_days: "10",
+      request_id: meta.requestId,
+      trade_date: meta.tradeDate,
+    };
+  }
 
   return { workflow, url, body: { ref: env.GITHUB_REF || "main", inputs } };
+}
+
+/** Alert detail is shown in a GitHub Issue: one line, bounded, no mentions
+ *  or markdown code fences. Pure. */
+export function cleanDetail(text) {
+  return String(text ?? "")
+    .replace(/[\u0000-\u001f\u007f]+/g, " ")
+    .replace(/[@`]/g, "")
+    .trim()
+    .slice(0, 300);
 }
 
 // The API base is fixed to GitHub. A loopback override exists only so the
@@ -168,6 +196,8 @@ export async function run({ cron, scheduledTime, source }, env, fetchImpl = fetc
 
   log("info", "invocation", base);
 
+  if (decision.kind === "staleness") return runStaleness({ base, scheduledTime, requestId, env, fetchImpl });
+
   if (decision.kind !== "test" && decision.kind !== "production") {
     log("info", "skipped", { ...base, reason: decision.reason });
     return { ...base, ok: true, skipped: true, reason: decision.reason };
@@ -193,6 +223,57 @@ export async function run({ cron, scheduledTime, source }, env, fetchImpl = fetc
   const result = await dispatch(request, env, fetchImpl);
   const outcome = { ...base, workflow: request.workflow, ...result, ...(readiness ? { readiness } : {}) };
   log(result.ok ? "info" : "error", result.ok ? "dispatch_ok" : "dispatch_failed", outcome);
+
+  // Phase 1.1 alerts for the production path. Best effort: an alert that
+  // cannot be sent is logged, never allowed to change the dispatch outcome.
+  if (decision.kind === "production") {
+    const date = readiness.trade_date;
+    if (!result.ok) {
+      outcome.alerts = [await sendAlert("dispatch_failed", date, `dispatch HTTP ${result.status}: ${result.error ?? ""}`, env, fetchImpl)];
+    } else if (readiness.decision.completeness === "unverified") {
+      outcome.alerts = [await sendAlert("nse_blocked", date, readiness.decision.reason, env, fetchImpl)];
+    }
+  }
+  return outcome;
+}
+
+/** Dispatch the alert workflow. Never throws; returns a log-safe result. */
+export async function sendAlert(alertKind, tradeDate, detail, env, fetchImpl = fetch) {
+  try {
+    const request = buildDispatch("alert", { alertKind, tradeDate, detail, requestId: crypto.randomUUID() }, env);
+    const result = await dispatch(request, env, fetchImpl);
+    log(result.ok ? "info" : "error", result.ok ? "alert_sent" : "alert_failed", { alert: alertKind, trade_date: tradeDate, status: result.status });
+    return { alert: alertKind, ok: result.ok, status: result.status };
+  } catch (err) {
+    log("error", "alert_failed", { alert: alertKind, trade_date: tradeDate, error: String(err?.message ?? err).slice(0, 120) });
+    return { alert: alertKind, ok: false, status: 0 };
+  }
+}
+
+/** Phase 1.1 daily staleness check: at most ONE emergency dispatch, plus alerts. */
+async function runStaleness({ base, scheduledTime, requestId, env, fetchImpl }) {
+  const check = await checkStaleness({ scheduledTime, env, fetchImpl });
+  const date = check.trade_date;
+  const outcome = { ...base, trade_date: date, staleness: check, alerts: [], ok: true };
+
+  if (check.decision.action === "emergency_dispatch") {
+    const request = buildDispatch("production", { requestId, tradeDate: date }, env);
+    const result = await dispatch(request, env, fetchImpl);
+    outcome.emergency_dispatch = { workflow: request.workflow, ...result };
+    outcome.ok = result.ok;
+    const detail = `${check.decision.reason}; emergency dispatch ${result.ok ? "sent" : `FAILED (HTTP ${result.status})`}`;
+    outcome.alerts.push(await sendAlert(check.decision.alert, date, detail, env, fetchImpl));
+  } else if (check.decision.action === "alert") {
+    outcome.alerts.push(await sendAlert(check.decision.alert, date, check.decision.reason, env, fetchImpl));
+  }
+  if (check.token.alert) {
+    const detail = `dispatch token expires ${check.token.expires} (${check.token.days} day(s)); rotate GH_DISPATCH_TOKEN`;
+    outcome.alerts.push(await sendAlert("token_expiring", date, detail, env, fetchImpl));
+  }
+  log(outcome.ok ? "info" : "error", "staleness_check", {
+    ...base, trade_date: date, decision: check.decision, token_days: check.token.days ?? null,
+    alerts: outcome.alerts.map((a) => `${a.alert}:${a.ok ? "sent" : "failed"}`),
+  });
   return outcome;
 }
 
@@ -221,7 +302,7 @@ const json = (status, body) =>
  */
 export async function handleFetch(request, env, fetchImpl = fetch) {
   const url = new URL(request.url);
-  const known = ["/__test-dispatch", "/__test-auth", "/__test-nse", "/__test-readiness"].includes(url.pathname);
+  const known = ["/__test-dispatch", "/__test-auth", "/__test-nse", "/__test-readiness", "/__test-staleness"].includes(url.pathname);
   if (request.method !== "POST" || !known || !env.TEST_TRIGGER_KEY) {
     return json(404, { error: "not found" });
   }
@@ -235,6 +316,7 @@ export async function handleFetch(request, env, fetchImpl = fetch) {
   if (url.pathname === "/__test-auth") return new Response(null, { status: 204 });
   if (url.pathname === "/__test-nse") return nseProbe(request, url, fetchImpl);
   if (url.pathname === "/__test-readiness") return readinessDryRun(url, env, fetchImpl);
+  if (url.pathname === "/__test-staleness") return stalenessDryRun(url, env, fetchImpl);
   const outcome = await run(
     { cron: "manual-test", scheduledTime: Date.now(), source: "manual-test" },
     env,
@@ -273,6 +355,22 @@ async function readinessDryRun(url, env, fetchImpl) {
   const result = await evaluate({ scheduledTime, env, fetchImpl });
   log("info", "readiness_dry_run", { trade_date: result.trade_date, at_utc: at, decision: result.decision });
   return json(200, { dry_run: true, dispatched: false, at_utc: at, run_tag: runTag(result.trade_date), ...result });
+}
+
+// DRY RUN of the Phase 1.1 staleness check for a date and UTC time: reads
+// GitHub and NSE, returns the decision and token status, NEVER dispatches
+// anything (no emergency dispatch, no alert).
+async function stalenessDryRun(url, env, fetchImpl) {
+  const date = url.searchParams.get("date") ?? "";
+  const at = url.searchParams.get("at") ?? "15:05";
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || !/^\d{2}:\d{2}$/.test(at)) {
+    return json(400, { error: "date=YYYY-MM-DD and at=HH:MM (UTC) required" });
+  }
+  const scheduledTime = Date.parse(`${date}T${at}:00Z`);
+  if (Number.isNaN(scheduledTime)) return json(400, { error: "invalid date/time" });
+  const check = await checkStaleness({ scheduledTime, env, fetchImpl });
+  log("info", "staleness_dry_run", { trade_date: check.trade_date, decision: check.decision });
+  return json(200, { dry_run: true, dispatched: false, alerted: false, at_utc: at, ...check });
 }
 
 export default {

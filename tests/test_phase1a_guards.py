@@ -17,6 +17,9 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOWS = ROOT / ".github" / "workflows"
 WRITER_GROUP = "database-writer"
+# Workflows that read the database without the writer lock, with the one
+# script each runs against it (verified read-only below).
+READ_ONLY_DB_WORKFLOWS = {"data-freshness.yml": "freshness_check.py"}
 
 # Code that runs in normal (non-migration) operation.
 NORMAL_JOB_FILES = [
@@ -75,9 +78,25 @@ class TestSingleWriterLock:
         assert db_workflows, "expected at least one workflow using DATABASE_URL"
         wrong = {
             name: concurrency_group(text) for name, text in db_workflows.items()
-            if concurrency_group(text) != WRITER_GROUP
+            if concurrency_group(text) != WRITER_GROUP and name not in READ_ONLY_DB_WORKFLOWS
         }
         assert not wrong, f"workflows outside the {WRITER_GROUP!r} group: {wrong}"
+
+    @pytest.mark.parametrize("name,script", sorted(READ_ONLY_DB_WORKFLOWS.items()))
+    def test_read_only_exemptions_really_are_read_only(self, name, script):
+        """Phase 1.1: a workflow may skip the writer lock ONLY if every script it
+        runs with DATABASE_URL opens a read-only connection and never commits.
+        Holding the lock would let it cancel a PENDING daily run."""
+        text = (WORKFLOWS / name).read_text()
+        assert f"scripts/{script}" in text
+        src = (ROOT / "scripts" / script).read_text()
+        tree = ast.parse(src)
+        calls = [n for n in ast.walk(tree) if isinstance(n, ast.Call) and getattr(n.func, "id", None) == "connect"]
+        assert calls, script
+        for call in calls:
+            kw = {k.arg: k.value for k in call.keywords}
+            assert getattr(kw.get("read_only"), "value", None) is True, script
+        assert ".commit()" not in src
 
     @pytest.mark.parametrize("name", ["daily-data-update.yml", "backfill.yml", "migrate.yml"])
     def test_known_writers_share_the_group(self, name):

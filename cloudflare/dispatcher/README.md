@@ -16,6 +16,14 @@ runs; dispatch) and GETs of the allowlisted NSE files for the readiness gate.
 | `PRODUCTION_ENABLED` | `"true"` | |
 | `READINESS_FINAL_UTC` | `"14:45"` | From here a UDiFF-only day is accepted as partial |
 | GitHub fallback | `17 14 * * 1-5` (14:17 UTC) in `daily-data-update.yml` | Exits immediately if today's Cloudflare run succeeded |
+| Staleness cron (Phase 1.1) | `5 15 * * 1-5` (15:05 UTC, weekdays) | If today did not load: ONE emergency dispatch + GitHub Issue alert; also warns before `GH_DISPATCH_TOKEN` expires |
+| `BLOCKED_DISPATCH_AFTER_UTC` (Phase 1.1) | `"12:00"` | If NSE is **unreachable** from Cloudflare (403/429/5xx/network, not 404), dispatch anyway from 12:00; GitHub's runners fetch NSE themselves. Delete the line to restore Phase 1 behaviour |
+
+Alerts (Phase 1.1) go to **GitHub Issues** titled `[pipeline-alert] <kind> <date>`, opened by
+`.github/workflows/pipeline-alert.yml`, which @mentions the owner so GitHub emails them. A repeat
+alert comments on the open issue instead of opening a duplicate. An independent next-morning
+check, `.github/workflows/data-freshness.yml`, reads Neon (read-only) and alerts on any
+published trading day that is not loaded. It works even if Cloudflare or the token is broken.
 
 Invocation kinds:
 

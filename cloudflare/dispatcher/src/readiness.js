@@ -12,6 +12,11 @@
 //   3. Only in the final window of the day: is the UDiFF bhavcopy published
 //      for the right date?                          -> dispatch ("partial";
 //      the pipeline marks the day partial and enriches it on a later run)
+//   4. Phase 1.1: NSE UNREACHABLE from Cloudflare (403/429/5xx/network/
+//      challenge page - anything but 200 or 404) and it is at/after
+//      BLOCKED_DISPATCH_AFTER_UTC                   -> dispatch ("unverified";
+//      the pipeline fetches NSE itself from GitHub's runners). Unset
+//      BLOCKED_DISPATCH_AFTER_UTC disables this, restoring Phase 1 behaviour.
 //   Otherwise                                       -> skip (not published)
 //
 // All reads. Nothing here writes anywhere or dispatches anything; the
@@ -62,7 +67,7 @@ export function summariseRuns(runs, tradeDate) {
  * github: summariseRuns() output, or { error } if GitHub could not be read.
  * delivery / udiff: fileCheck() results, or null if not checked.
  */
-export function decide({ github, delivery, udiff, finalWindow }) {
+export function decide({ github, delivery, udiff, finalWindow, blockedDispatchOk = false }) {
   if (!github || github.error) {
     // Fail closed: without knowing what already ran, a dispatch could duplicate.
     return { action: "skip", reason: "github state unknown", error: github?.error ?? "missing" };
@@ -76,7 +81,24 @@ export function decide({ github, delivery, udiff, finalWindow }) {
   if (finalWindow && udiff?.ready) {
     return { action: "dispatch", completeness: "partial", reason: "final window: UDiFF published, delivery not yet" };
   }
+  if (delivery?.blocked) {
+    // Cloudflare cannot see NSE, which says nothing about whether GitHub's
+    // runners can. Dispatch once it is late enough that NSE has normally
+    // published; the pipeline records the date as pending if it has not.
+    return blockedDispatchOk
+      ? { action: "dispatch", completeness: "unverified", reason: "NSE unreachable from Cloudflare; pipeline fetches from GitHub" }
+      : { action: "skip", reason: "NSE unreachable from Cloudflare; waiting for the blocked-dispatch time" };
+  }
   return { action: "skip", reason: finalWindow ? "not published by the final window" : "not published yet" };
+}
+
+/** 404 means "not published"; 200 is data unless it is an HTML page; anything
+ *  else (403, 429, 5xx, network failure, challenge page) means NSE could not be
+ *  reached from here. Pure. */
+export function isBlocked(status, contentType) {
+  if (status === 404) return false;
+  if (status === 200) return /text\/html/i.test(contentType ?? "");
+  return true;
 }
 
 // ---- observations (reads only) ------------------------------------------
@@ -94,10 +116,11 @@ export async function checkDelivery(tradeDate, fetchImpl = fetch) {
   try {
     const r = await timedGet(url, fetchImpl, { "User-Agent": USER_AGENT });
     const base = { file: "delivery_bhavcopy", status: r.status, ms: r.ms, bytes: r.body.byteLength };
+    if (isBlocked(r.status, r.contentType)) return { ...base, ready: false, blocked: true, why: `unreachable: HTTP ${r.status}` };
     if (r.status !== 200) return { ...base, ready: false, why: `HTTP ${r.status}` };
     return { ...base, ...validateDelivery(new TextDecoder().decode(r.body), tradeDate) };
   } catch (err) {
-    return { file: "delivery_bhavcopy", status: 0, ready: false, why: String(err?.message ?? err).slice(0, 120) };
+    return { file: "delivery_bhavcopy", status: 0, ready: false, blocked: true, why: String(err?.message ?? err).slice(0, 120) };
   }
 }
 
@@ -121,6 +144,7 @@ export async function checkUdiff(tradeDate, fetchImpl = fetch) {
   try {
     const r = await timedGet(url, fetchImpl, { "User-Agent": USER_AGENT });
     const base = { file: "udiff_bhavcopy", status: r.status, ms: r.ms, bytes: r.body.byteLength };
+    if (isBlocked(r.status, r.contentType)) return { ...base, ready: false, blocked: true, why: `unreachable: HTTP ${r.status}` };
     if (r.status !== 200) return { ...base, ready: false, why: `HTTP ${r.status}` };
     const zip = await inspectZip(r.body, { lines: 2 });
     if (!zip.valid || !zip.csv_header?.startsWith("TradDt")) return { ...base, ready: false, why: "unexpected archive" };
@@ -128,7 +152,7 @@ export async function checkUdiff(tradeDate, fetchImpl = fetch) {
     if (first !== tradeDate) return { ...base, ready: false, why: `file dated ${first || "?"}` };
     return { ...base, ready: true, first_date: first };
   } catch (err) {
-    return { file: "udiff_bhavcopy", status: 0, ready: false, why: String(err?.message ?? err).slice(0, 120) };
+    return { file: "udiff_bhavcopy", status: 0, ready: false, blocked: true, why: String(err?.message ?? err).slice(0, 120) };
   }
 }
 
@@ -149,7 +173,10 @@ export async function readRuns(tradeDate, env, fetchImpl = fetch) {
     });
     if (res.status !== 200) return { error: `GitHub HTTP ${res.status}` };
     const data = await res.json();
-    return summariseRuns(data.workflow_runs, tradeDate);
+    // Phase 1.1: GitHub reports a PAT's expiry on every response. Absent when
+    // the token has no expiry, which is not an error.
+    const expires = res.headers.get("github-authentication-token-expiration");
+    return { ...summariseRuns(data.workflow_runs, tradeDate), ...(expires ? { token_expires: expires } : {}) };
   } catch (err) {
     return { error: "GitHub request failed" };
   }
@@ -162,6 +189,8 @@ export async function readRuns(tradeDate, env, fetchImpl = fetch) {
 export async function evaluate({ scheduledTime, tradeDate, env, fetchImpl = fetch }) {
   const date = tradeDate ?? istDate(scheduledTime);
   const finalWindow = isFinalWindow(scheduledTime, env.READINESS_FINAL_UTC);
+  // Unset -> "23:59" -> never: the blocked branch is off unless configured.
+  const blockedDispatchOk = isFinalWindow(scheduledTime, env.BLOCKED_DISPATCH_AFTER_UTC);
   const github = await readRuns(date, env, fetchImpl);
   let delivery = null;
   let udiff = null;
@@ -171,6 +200,6 @@ export async function evaluate({ scheduledTime, tradeDate, env, fetchImpl = fetc
   }
   delivery = await checkDelivery(date, fetchImpl);
   if (!delivery.ready && finalWindow) udiff = await checkUdiff(date, fetchImpl);
-  const decision = decide({ github, delivery, udiff, finalWindow });
+  const decision = decide({ github, delivery, udiff, finalWindow, blockedDispatchOk });
   return { trade_date: date, final_window: finalWindow, github, delivery, udiff, decision };
 }

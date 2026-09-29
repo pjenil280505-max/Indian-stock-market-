@@ -70,7 +70,7 @@ test("the committed wrangler.toml has exactly the approved production config", (
   assert.match(toml, /^PRODUCTION_ENABLED = "true"$/m);
   assert.match(toml, /^PRODUCTION_CRONS = "\*\/15 11-14 \* \* 1-5"$/m);
   const crons = [...toml.matchAll(/^crons = \[(.*)\]$/gm)].map((m) => m[1]);
-  assert.deepEqual(crons, ['"37 4 * * *", "*/15 11-14 * * 1-5"']);
+  assert.deepEqual(crons, ['"37 4 * * *", "*/15 11-14 * * 1-5", "5 15 * * 1-5"']);
   const env = { PRODUCTION_CRONS: "*/15 11-14 * * 1-5", PRODUCTION_ENABLED: "true", TEST_CRONS: "37 4 * * *" };
   assert.equal(classify("*/15 11-14 * * 1-5", env).kind, "production");
   assert.equal(classify("37 4 * * *", env).kind, "test");
@@ -91,8 +91,10 @@ test("test dispatch targets the no-op probe with its declared inputs", () => {
   });
 });
 
-test("only the two known workflows can ever be targeted", () => {
-  assert.deepEqual(Object.values(WORKFLOWS).sort(), ["cloudflare-dispatch-probe.yml", "daily-data-update.yml"]);
+test("only the three known workflows can ever be targeted", () => {
+  assert.deepEqual(Object.values(WORKFLOWS).sort(), [
+    "cloudflare-dispatch-probe.yml", "daily-data-update.yml", "pipeline-alert.yml",
+  ]);
   for (const kind of ["migrate", "backfill", "blocked", "ignored", "__proto__", "constructor"]) {
     assert.throws(() => buildDispatch(kind, {}, ENV));
   }

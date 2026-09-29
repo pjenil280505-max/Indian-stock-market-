@@ -970,3 +970,63 @@ Every production path is now verified live:
 Watch item: the fallback's UTC-date check would roll to the next day if GitHub ever delayed a
 run past 00:00 UTC (~9.7 h). The run would then do a safe, idempotent pipeline load instead
 of skipping.
+
+
+---
+
+# Addendum K — Phase 1.1 reliability hardening (built and tested; NOT deployed)
+
+Specification: the design approved on 2026-09-29, with GitHub Issues and email for alerts.
+All work is on branch `claude/indian-stock-research-phase-0-o6zage`. `main`, and therefore
+production, is unchanged at `cc75b8a` until the final diff is approved.
+
+## K.1 What each change does
+
+| | Change | Files | Phase 1 behaviour |
+|---|---|---|---|
+| A | Gate separates **unreachable** (403/429/5xx/network/HTML-200) from **not published** (404). When unreachable, it dispatches from `BLOCKED_DISPATCH_AFTER_UTC` (12:00), because GitHub's runners fetch NSE themselves, and raises `nse_blocked`. | `readiness.js`, `index.js`, `wrangler.toml` | Unchanged when the setting is absent (tested). Only the log reason for a blocked skip differs. |
+| B | **Staleness cron** `5 15 * * 1-5`: if today's run hasn't succeeded, ONE emergency dispatch (normal `cloudflare <date>` tag, so duplicate protection and the fallback see it) plus an alert. A day where nothing is published (holiday) gets no dispatch and no alert. | `monitor.js`, `index.js`, `wrangler.toml` | New path only |
+| C | **Alerts** as GitHub Issues: `pipeline-alert.yml` (built-in token, `issues: write`, no secrets, no concurrency group so no alert is dropped) runs `scripts/raise_alert.sh`, which validates every input, @mentions the owner and comments on an open duplicate instead of opening another. | new files | None |
+| D | **Token expiry**: reads `GitHub-Authentication-Token-Expiration` and alerts at 14, 7, 3 and 1 days and after expiry. A missing header (a token with no expiry) is not an error. | `readiness.js`, `monitor.js` | None |
+| E | **Independent freshness check**, 03:23 UTC Tue–Sat on GitHub: a read-only connection plus NSE, flagging any published weekday not loaded. It does not take the writer lock (holding it could cancel a pending daily run); the guard allows this only for scripts proven read-only. | `freshness_check.py`, `data-freshness.yml` | None |
+
+The Worker can now reach three workflows: probe, daily and alert. It still cannot reach
+migrations or backfill. The staleness check is gated by `PRODUCTION_ENABLED` like the
+production cron.
+
+## K.2 Verification (pre-deploy)
+
+- Tests: Worker 63 → 92, Python 287 → 309, actionlint clean, `wrangler deploy --dry-run` builds.
+- Every existing Phase 1 test passes unchanged, apart from 5 guards that pin config (cron list,
+  workflow allowlist, source-file list, writer-group rule). Each was changed to pin the new
+  approved state, not loosened.
+- **Mutation testing**: 8 deliberate breakages of the new logic, all caught: blocked-time
+  ignored, 404 treated as blocked, staleness ignoring success, holiday dispatching, missing
+  `nse_blocked` alert, mentions not stripped, alert-kind allowlist removed (initially caught only
+  indirectly; a test now pins it), freshness trusting `failed`.
+- **workerd smoke**: the staleness cron ran in the real Workers runtime. A fake token got a
+  genuine 401 from GitHub, so the Worker raised `github_unreadable` with exactly the declared
+  alert inputs. The fake token appeared 0 times in the logs.
+
+## K.3 Deploy order (after approval) and rollback
+
+1. Tag `phase1-final` at `cc75b8a` (rollback point), then fast-forward `main` to the branch.
+   This activates the two new workflows. The Worker is not yet changed.
+2. Dispatch `pipeline-alert` with `test_alert` and confirm the issue **and the email arrive**.
+3. Dispatch `data-freshness` manually: expect "OK" and no write.
+4. Run `Cloudflare Worker → deploy-and-test`. It deploys the Phase 1.1 Worker and runs the probe smoke test.
+5. Run the staleness dry run on the deployed Worker (never dispatches).
+6. Watch the next weekday: exactly one daily run, no alert, and the 15:05 staleness fire finding "ok".
+
+Rollback: Worker only → delete `BLOCKED_DISPATCH_AFTER_UTC` and the `5 15` cron and redeploy,
+or redeploy from tag `phase1-final`. Everything → revert the merge commit. No schema or
+data change is involved at any step.
+
+## K.4 Not covered, stated plainly
+
+- A block of NSE from **GitHub's** runners too. Nothing here can collect data then; the
+  freshness check will alert, but a human must act.
+- Whether GitHub actually emails the owner. [Likely] yes, via the @mention and default
+  notification settings. Step 2 verifies it for real.
+- The token-expiry header for fine-grained tokens is [Likely] per GitHub's changelog. If
+  it is absent, no warning fires, so set a calendar reminder as a backstop.
