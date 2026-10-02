@@ -1,0 +1,39 @@
+name: Compare delivery file (read-only)
+
+# One-off diagnostic: did NSE revise the 29 Sep delivery file after we loaded
+# it? Runs ONLY on a push to the working branch that touches this check, never
+# on main, on a schedule or from the Worker. The script opens a READ-ONLY
+# connection and never commits. Shares the writer lock only so it never
+# reads mid-write.
+on:
+  push:
+    branches: [claude/indian-stock-research-phase-0-o6zage]
+    paths:
+      - .github/workflows/compare-delivery.yml
+      - scripts/compare_delivery.py
+
+concurrency:
+  group: database-writer
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  compare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Compare NSE 29 Sep delivery file with Neon (read-only)
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: python3 scripts/compare_delivery.py --date 2026-09-29
