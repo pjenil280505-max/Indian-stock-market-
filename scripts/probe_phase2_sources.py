@@ -241,16 +241,17 @@ class Probe:
                     print(f"  xbrl link shapes: {json.dumps(dict(shapes.most_common(5)))}")
         return recs
 
-    def page_api_paths(self, label: str, url: str) -> None:
+    def page_api_paths(self, label: str, url: str) -> list[str]:
         """The /api/ paths a public NSE page itself references (no guessing)."""
         if self.refused:
-            return
+            return []
         status, body, headers = self.get(url)
         paths = sorted(set(re.findall(rb"/api/[A-Za-z0-9_\-/]+", body)))
         print(f"\n[{label}] PAGE {url.split('/', 3)[-1]} -> {status} {len(body):,} bytes;"
               f" /api/ paths referenced: {[x.decode() for x in paths][:40]}")
         scripts = re.findall(rb'src="(/[^"]+\.js)"', body)
         print(f"  scripts referenced: {len(scripts)}")
+        return [x.decode() for x in scripts]
 
     def xbrl(self, label: str, url: str) -> None:
         if self.refused:
@@ -314,8 +315,31 @@ def round_two(p: "Probe") -> None:
           enums=True)
 
 
+def round_three(p: "Probe") -> None:
+    """When did results XBRL start, and where do results after early 2025 live?"""
+    for year in (2017, 2018, 2019, 2020):
+        p.api(f"results {year}-08-07..{year}-08-14",
+              f"corporates-financial-results?index=equities&period=Quarterly&from_date=07-08-{year}&to_date=14-08-{year}",
+              enums=True)
+    # Read the integrated-filing page's own scripts for the API it calls.
+    found = set()
+    for script in p.page_api_paths("integrated filing page", "https://www.nseindia.com/companies-listing/corporate-integrated-filing")[:2]:
+        status, body, _ = p.get(f"https://www.nseindia.com{script}")
+        paths = sorted({x.decode() for x in re.findall(rb"/api/[A-Za-z0-9_\-]+", body)})
+        print(f"\n[script {script.rsplit('/', 1)[-1][:40]}] -> {status} {len(body):,} bytes; /api/ paths: {paths[:60]}")
+        found.update(x for x in paths if "integrated" in x.lower())
+    for path in sorted(found)[:1]:  # one call to the page's own endpoint, Q1 FY27 season
+        p.api(f"integrated {path} 2026-08-07..2026-08-14",
+              f"{path[len('/api/'):]}?index=equities&from_date=07-08-2026&to_date=14-08-2026", enums=True)
+
+
 def main() -> int:
     p = Probe()
+    if "--round" in sys.argv and sys.argv[sys.argv.index("--round") + 1] == "3":
+        print("Phase 2.0 source probe, round 3 - metadata only; nothing stored, no database")
+        round_three(p)
+        print(f"\nSUMMARY requests={p.requests} ok={p.successes} refused={p.refusals}")
+        return 0
     if "--round" in sys.argv and sys.argv[sys.argv.index("--round") + 1] == "2":
         print("Phase 2.0 source probe, round 2 - metadata only; nothing stored, no database")
         round_two(p)
