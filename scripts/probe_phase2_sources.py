@@ -466,8 +466,58 @@ def round_eight(p: "Probe") -> None:
             p.xbrl(f"integrated XBRL from {start} window", links[0])
 
 
+def round_nine(p: "Probe") -> None:
+    """Run the Phase 2.3 parser on real filings of every family and era.
+    Prints verdicts and which canonical fields were found - never values."""
+    from src.fundamentals.results_xbrl import MAPPINGS, parse_results
+
+    picks: list[tuple[str, str]] = []
+
+    def classic(start, end, want):
+        recs = p.api(f"results {start}..{end}",
+                     f"corporates-financial-results?index=equities&period=Quarterly&from_date={nse_date(start)}&to_date={nse_date(end)}")
+        for prefix, n in want:
+            links = [l for l in xml_links(recs) if l.rsplit("/", 1)[-1].startswith(prefix)][:n]
+            picks.extend((f"classic {start.year} {prefix}", l) for l in links)
+
+    classic(date(2021, 8, 6), date(2021, 8, 13), [("INDAS_", 2)])
+    classic(date(2024, 11, 7), date(2024, 11, 14), [("INDAS_", 2), ("BANKING_", 1), ("NBFC_INDAS_", 1), ("NONINDAS_", 1)])
+    for start, end, n in ((date(2026, 8, 7), date(2026, 8, 14), 3), (date(2025, 5, 15), date(2025, 5, 22), 2)):
+        status, body, _ = p.get(f"{NSE_API}/{integrated_path(start, end)}")
+        recs = records_of(json.loads(body)) if status == 200 else []
+        revisions = [r for r in recs if r.get("type_Sub") == "Revision"][:1]
+        for r in (recs[:n] + revisions):
+            picks.append((f"integrated {start.year} {r.get('type_Sub')} {r.get('consolidated')}", r.get("xbrl", "")))
+
+    found_fields: Counter = Counter()
+    verdicts: Counter = Counter()
+    for label, url in picks:
+        status, body, _ = p.get(url)
+        if status != 200:
+            print(f"\n[{label}] -> HTTP {status}")
+            verdicts["http_error"] += 1
+            continue
+        r = parse_results(body, name_hint=url)
+        expected = set(MAPPINGS[r.template or "general"])
+        got = set(r.facts)
+        found_fields.update(got)
+        verdicts["accepted" if r.accepted else "rejected"] += 1
+        print(f"\n[{label}] {r.template} {r.taxonomy} {r.basis} {r.period_start}..{r.period_end} ({r.period_type})"
+              f" audited={r.audited} isin={'yes' if r.isin else 'no'}")
+        print(f"  contexts: {r.context_counts}")
+        print(f"  ACCEPTED={r.accepted} problems={r.problems} warnings={r.warnings}")
+        print(f"  found {len(got)}/{len(expected)}: {sorted(got)}")
+        print(f"  missing: {sorted(expected - got)}")
+    print(f"\nVERDICTS {dict(verdicts)}; field coverage across files: {dict(found_fields.most_common())}")
+
+
 def main() -> int:
     p = Probe()
+    if "--round" in sys.argv and sys.argv[sys.argv.index("--round") + 1] == "9":
+        print("Phase 2.0 source probe, round 9 (parser on real filings) - verdicts only, no values")
+        round_nine(p)
+        print(f"\nSUMMARY requests={p.requests} ok={p.successes} refused={p.refusals}")
+        return 0
     if "--round" in sys.argv and sys.argv[sys.argv.index("--round") + 1] == "8":
         print("Phase 2.0 source probe, round 8 - metadata only; nothing stored, no database")
         round_eight(p)

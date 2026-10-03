@@ -11,6 +11,7 @@ on:
     paths:
       - .github/workflows/phase2-source-probe.yml
       - scripts/probe_phase2_sources.py
+      - src/fundamentals/**
 
 permissions:
   contents: read
@@ -27,4 +28,4 @@ jobs:
           python-version: '3.11'
 
       - name: Probe NSE filing sources (read-only, metadata only)
-        run: python3 scripts/probe_phase2_sources.py --round 8
+        run: python3 scripts/probe_phase2_sources.py --round 9
