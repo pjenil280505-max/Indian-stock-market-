@@ -27,4 +27,4 @@ jobs:
           python-version: '3.11'
 
       - name: Probe NSE filing sources (read-only, metadata only)
-        run: python3 scripts/probe_phase2_sources.py
+        run: python3 scripts/probe_phase2_sources.py --round 2

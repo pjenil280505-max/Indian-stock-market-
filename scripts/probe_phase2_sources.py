@@ -39,6 +39,7 @@ from src.config import NSE_API  # noqa: E402
 PACE_SECONDS = 2.0
 MAX_XBRL_BYTES = 20 * 1024 * 1024
 STOP_AFTER_REFUSALS = 3
+SHOW_ELEMENT_NAMES = False  # taxonomy vocabulary only; set by round 2
 TIMESTAMPISH = re.compile(r"(date|time|dt|dis|broad|filing|sort)", re.I)
 # Reg 33 / shareholding element names worth knowing about (local names).
 XBRL_TARGETS = (
@@ -91,6 +92,28 @@ def field_summary(records: list[dict]) -> dict:
         "fields": {k: f"{kinds.get(k, '?')} {filled[k]}/{len(records)}" for k in sorted({*filled, *(k for r in records for k in r)})},
         "timestamp_examples": stamps,
     }
+
+
+def enumerations(records: list[dict], max_distinct: int = 30, min_count: int = 3) -> dict:
+    """Value counts for low-cardinality fields (categories, flags, period labels).
+
+    A value is shown only if it repeats at least `min_count` times, so a
+    one-off headline or company name can never be printed.
+    """
+    out = {}
+    for k in sorted({k for r in records for k in r}):
+        counts = Counter(str(r.get(k))[:60] for r in records if r.get(k) not in (None, "", "-"))
+        shown = {v: n for v, n in counts.most_common(20) if n >= min_count}
+        if shown and (len(counts) <= max_distinct or k in ("desc", "subject")):
+            out[k] = shown
+    return out
+
+
+def link_shape(value) -> str:
+    """The shape of a link without its identifying parts: digits -> 9."""
+    if not isinstance(value, str) or not value:
+        return repr(value)[:20]
+    return re.sub(r"[0-9]", "9", re.sub(r"[A-Za-z]{12,}", "<name>", value))[:110]
 
 
 def xml_links(records: list[dict]) -> list[str]:
@@ -148,6 +171,7 @@ def inspect_xbrl(body: bytes) -> dict:
         "units": dict(units.most_common(6)),
         "decimals": dict(decimals.most_common(6)),
         "isin": isin,
+        "element_names": sorted(names) if SHOW_ELEMENT_NAMES else None,
         "targets_present": [t for t in XBRL_TARGETS if t in names],
         "targets_missing": [t for t in XBRL_TARGETS if t not in names],
     }
@@ -191,7 +215,7 @@ class Probe:
     def refused(self) -> bool:
         return self.successes == 0 and self.refusals >= STOP_AFTER_REFUSALS
 
-    def api(self, label: str, path: str) -> list[dict]:
+    def api(self, label: str, path: str, enums: bool = False) -> list[dict]:
         if self.refused:
             print(f"\n[{label}] SKIPPED: NSE refused the first {self.refusals} API calls; not pressing further")
             return []
@@ -210,7 +234,23 @@ class Probe:
             s = field_summary(recs)
             print(f"  fields: {json.dumps(s['fields'])}")
             print(f"  timestamp examples: {json.dumps(s['timestamp_examples'])}")
+            if enums:
+                print(f"  enumerations: {json.dumps(enumerations(recs))}")
+                shapes = Counter(link_shape(r.get("xbrl")) for r in recs if "xbrl" in r)
+                if shapes:
+                    print(f"  xbrl link shapes: {json.dumps(dict(shapes.most_common(5)))}")
         return recs
+
+    def page_api_paths(self, label: str, url: str) -> None:
+        """The /api/ paths a public NSE page itself references (no guessing)."""
+        if self.refused:
+            return
+        status, body, headers = self.get(url)
+        paths = sorted(set(re.findall(rb"/api/[A-Za-z0-9_\-/]+", body)))
+        print(f"\n[{label}] PAGE {url.split('/', 3)[-1]} -> {status} {len(body):,} bytes;"
+              f" /api/ paths referenced: {[x.decode() for x in paths][:40]}")
+        scripts = re.findall(rb'src="(/[^"]+\.js)"', body)
+        print(f"  scripts referenced: {len(scripts)}")
 
     def xbrl(self, label: str, url: str) -> None:
         if self.refused:
@@ -223,8 +263,64 @@ class Probe:
             print(f"  {json.dumps(inspect_xbrl(body))}")
 
 
+def round_two(p: "Probe") -> None:
+    """Closes the round-1 gaps: recent results, old XBRL links, SHP history."""
+    global SHOW_ELEMENT_NAMES
+    SHOW_ELEMENT_NAMES = True
+
+    # a. Where do recent results live? Bracket the cut-off, then read the
+    #    integrated-filing page's own API references.
+    results = {}
+    for start, end in ((date(2024, 8, 7), date(2024, 8, 14)), (date(2024, 11, 7), date(2024, 11, 14)),
+                       (date(2025, 2, 7), date(2025, 2, 14)), (date(2025, 8, 7), date(2025, 8, 14))):
+        results[start] = p.api(
+            f"results {start}..{end}",
+            f"corporates-financial-results?index=equities&period=Quarterly&from_date={nse_date(start)}&to_date={nse_date(end)}",
+            enums=True)
+    p.page_api_paths("integrated filing page", "https://www.nseindia.com/companies-listing/corporate-integrated-filing")
+
+    # b. Old XBRL link format (2012/2016 had a non-.xml value).
+    old = p.api("results 2016-08-08..2016-08-12",
+                f"corporates-financial-results?index=equities&period=Quarterly&from_date={nse_date(date(2016, 8, 8))}&to_date={nse_date(date(2016, 8, 12))}",
+                enums=True)
+
+    # c. Balance-sheet quarter (Q2) XBRL: one non-bank, one bank.
+    q2 = results.get(date(2024, 11, 7)) or []
+    for want_bank, label in ((False, "non-bank"), (True, "bank")):
+        for r in q2:
+            link = r.get("xbrl", "")
+            is_bank = str(r.get("bank", "")).upper() in ("B", "Y", "YES", "BANK")
+            if is_bank == want_bank and link.lower().endswith(".xml"):
+                p.xbrl(f"results XBRL Q2 FY25 {label} ({r.get('consolidated')})", link)
+                break
+    for r in old[:1]:
+        if str(r.get("xbrl", "")).lower().startswith("http"):
+            p.xbrl("results XBRL 2016", r["xbrl"])
+
+    # d. Shareholding history semantics: whole history for two large issuers.
+    for sym in ("RELIANCE", "TCS"):
+        recs = p.api(f"shareholding history {sym}", f"corporate-share-holdings-master?index=equities&symbol={sym}", enums=True)
+        if recs:
+            periods = sorted({r.get("date") for r in recs if r.get("date")}, key=lambda x: x[-4:] + x[3:6])
+            revised = sum(1 for r in recs if r.get("revisionDate"))
+            print(f"  periods: {len(periods)} ({periods[0]} .. {periods[-1]}); revised records: {revised}")
+            links = xml_links(recs)
+            if sym == "RELIANCE" and links:
+                p.xbrl("shareholding XBRL (element names)", links[0])
+
+    # e. Announcement categories for one day (repeat-only values).
+    p.api("announcements categories 2026-09-30",
+          f"corporate-announcements?index=equities&from_date={nse_date(date(2026, 9, 30))}&to_date={nse_date(date(2026, 9, 30))}",
+          enums=True)
+
+
 def main() -> int:
     p = Probe()
+    if "--round" in sys.argv and sys.argv[sys.argv.index("--round") + 1] == "2":
+        print("Phase 2.0 source probe, round 2 - metadata only; nothing stored, no database")
+        round_two(p)
+        print(f"\nSUMMARY requests={p.requests} ok={p.successes} refused={p.refusals}")
+        return 0
     print("Phase 2.0 source probe - metadata only; nothing stored, no database")
 
     # 1. Announcements: per-day volume now, then depth across the years.

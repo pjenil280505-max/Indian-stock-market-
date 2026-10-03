@@ -80,3 +80,17 @@ def test_probe_workflow_is_branch_only_secretless_and_read_only():
     assert "branches: [claude/indian-stock-research-phase-0-o6zage]" in code
     assert "schedule:" not in code and "workflow_dispatch:" not in code
     assert "permissions:\n  contents: read\n" in text
+
+
+def test_enumerations_never_show_one_off_values():
+    p = load()
+    recs = [{"desc": "Updates", "symbol": f"S{i}"} for i in range(5)] + [{"desc": "Unique headline about AAA", "symbol": "AAA"}]
+    e = p.enumerations(recs)
+    assert e["desc"] == {"Updates": 5}
+    assert "Unique headline" not in repr(e) and "AAA" not in repr(e)
+
+
+def test_link_shape_hides_identifiers():
+    p = load()
+    shape = p.link_shape("https://nsearchives.nseindia.com/corporate/xbrl/INDUSTRIALBANKLIMITED_12345_2016.xml")
+    assert "12345" not in shape and "INDUSTRIALBANK" not in shape and shape.endswith(".xml")
