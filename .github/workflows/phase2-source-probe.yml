@@ -1,0 +1,30 @@
+name: Phase 2.0 source probe (read-only)
+
+# Measures what NSE's filing endpoints actually return, from GitHub's runners
+# (NSE blocks other egress). No database, no secrets, nothing stored: it
+# prints field names, counts, sizes and timestamp formats only. Runs ONLY on a
+# push to the working branch that touches the probe - never on main, on a
+# schedule or from the Worker.
+on:
+  push:
+    branches: [claude/indian-stock-research-phase-0-o6zage]
+    paths:
+      - .github/workflows/phase2-source-probe.yml
+      - scripts/probe_phase2_sources.py
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Probe NSE filing sources (read-only, metadata only)
+        run: python3 scripts/probe_phase2_sources.py
