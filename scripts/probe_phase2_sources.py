@@ -503,6 +503,8 @@ def round_nine(p: "Probe") -> None:
         print(f"\n[{label}] {r.template} {r.taxonomy} {r.basis} isin={'yes' if r.isin else 'no'}"
               f" contexts={r.context_counts}")
         print(f"  ACCEPTED={r.accepted} problems={r.problems} warnings={r.warnings}")
+        if not r.context_counts:  # structure only: tags/namespaces, digits masked
+            print(f"  header: {re.sub(rb'[0-9]', b'9', body[:600]).decode(errors='replace')}")
         for col in r.columns:
             got = set(col.facts)
             found_fields.update(got)

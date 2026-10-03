@@ -292,9 +292,20 @@ def parse_results(body: bytes, *, name_hint: str | None = None) -> ParsedResults
         if not s or not e:
             continue
         _, cs, ce, _ = contexts[ctx]
-        if (cs, ce) != (s, e) or e <= s:
-            out.reject("period_mismatch", f"context {ctx} is {cs}..{ce} but states {s}..{e}")
+        if e <= s:
+            out.reject("period_mismatch", f"context {ctx} states {s}..{e}")
             continue
+        if (cs, ce) != (s, e):
+            # Known NSE classic-XBRL quirk (run 37098805990): the year-to-date
+            # column (context FourD) is stamped with the quarter's dates but
+            # states the longer period. Same end, earlier stated start: trust
+            # the filing's own statement, flag it, and check it below
+            # (year-to-date must not be smaller than the quarter).
+            if ce == e and cs is not None and s < cs:
+                out.warn("context_period_mislabelled", f"{ctx}: stamped {cs}..{ce}, states {s}..{e}")
+            else:
+                out.reject("period_mismatch", f"context {ctx} is {cs}..{ce} but states {s}..{e}")
+                continue
         col = columns.setdefault((s, e), Column(s, e, period_type(s, e)))
         if col.audited is None:
             col.audited = _audited(vals.get("WhetherResultsAreAuditedOrUnaudited"))
@@ -367,6 +378,16 @@ def _tolerance(*values: Decimal) -> Decimal:
 def _validate(out: ParsedResults) -> None:
     for i, col in enumerate(out.columns):
         _validate_column(out, col, primary=(i == 0))
+    # A longer column ending on the same date accumulates the shorter one:
+    # positive revenue/income to date can never be below the quarter's.
+    for short in out.columns:
+        for long in out.columns:
+            if long is short or long.end != short.end or long.start >= short.start:
+                continue
+            for k in ("revenue", "total_income", "interest_earned"):
+                a, b = short.facts.get(k), long.facts.get(k)
+                if a and b and a.value > 0 and b.value > 0 and b.value + _tolerance(a.value) < a.value:
+                    out.reject("ytd_below_quarter", f"{k}: {long.start}..{long.end} < {short.start}..{short.end}")
 
 
 def _validate_column(out: ParsedResults, col: Column, primary: bool) -> None:

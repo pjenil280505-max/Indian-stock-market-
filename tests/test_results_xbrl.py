@@ -219,3 +219,26 @@ def test_segment_balance_sheet_figures_are_never_read_as_company_totals():
     r = parse_results(doc(*PNL, fact("Assets", "I", "5000"), fact("Assets", "ISEG", "1200"), contexts=contexts))
     assert r.accepted, r.problems
     assert r.facts["total_assets"].value == 5000
+
+
+def test_classic_ytd_column_stamped_with_quarter_dates_is_trusted_and_flagged():
+    """NSE classic XBRL: context FourD carries quarter dates but states the
+    half-year. Same end date, earlier stated start -> the stated period wins."""
+    contexts = [ctx("OneD", "2024-07-01", "2024-09-30"), ctx("FourD", "2024-07-01", "2024-09-30"),
+                ctx("I", instant="2024-09-30")]
+    head = "".join(contexts) + UNITS + fact("NatureOfReportStandaloneConsolidated", "OneD", "Standalone", unit=None)
+    body = (column_meta("OneD", "2024-07-01", "2024-09-30") + column_meta("FourD", "2024-04-01", "2024-09-30")
+            + fact("RevenueFromOperations", "OneD", "100") + fact("ProfitBeforeTax", "OneD", "10")
+            + fact("RevenueFromOperations", "FourD", "190") + fact("ProfitBeforeTax", "FourD", "18"))
+    r = parse_results(f'<xbrli:xbrl {NS}>{head}{body}</xbrli:xbrl>'.encode())
+    assert r.accepted, r.problems
+    q, h = r.columns
+    assert (q.period_type, h.period_type) == ("Q", "H")
+    assert q.facts["revenue"].value == 100 and h.facts["revenue"].value == 190
+    assert [c for c, _ in r.warnings] == ["context_period_mislabelled"]
+
+
+def test_year_to_date_smaller_than_the_quarter_is_rejected():
+    r = parse_results(two_columns(fact("RevenueFromOperations", "Q", "500"), fact("ProfitBeforeTax", "Q", "1"),
+                                  fact("RevenueFromOperations", "Y", "300"), fact("ProfitBeforeTax", "Y", "2")))
+    assert "ytd_below_quarter" in [c for c, _ in r.problems]
