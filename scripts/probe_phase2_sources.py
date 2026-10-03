@@ -350,8 +350,37 @@ def round_four(p: "Probe") -> None:
         print(f"  attachment shapes: {json.dumps(dict(shapes.most_common(5)))}")
 
 
+IDENTIFIERISH = re.compile(rb"[\"'/=]([A-Za-z0-9_./\-?=&]*[Ii]ntegrat[A-Za-z0-9_./\-?=&]*)")
+SCRIPT_SRC = re.compile(rb"<script[^>]+src=[\"']([^\"']+)[\"']", re.I)
+
+
+def round_five(p: "Probe") -> None:
+    """Find the API the integrated-filing page uses by reading what the page
+    itself references - identifiers and script paths, never guessed URLs."""
+    page = "https://www.nseindia.com/companies-listing/corporate-integrated-filing"
+    status, body, _ = p.get(page)
+    print(f"\n[page] -> {status} {len(body):,} bytes")
+    refs = sorted({m.decode(errors="replace")[:120] for m in IDENTIFIERISH.findall(body)})
+    print(f"  'integrat' references in page: {refs[:40]}")
+    scripts = [s.decode() for s in SCRIPT_SRC.findall(body)]
+    print(f"  all script sources: {scripts[:40]}")
+    local = [s for s in scripts if s.startswith("/") and not re.search(r"(library|header|jquery|bootstrap|vendor|polyfill)", s, re.I)]
+    for src in local[:4]:
+        st, js, _ = p.get(f"https://www.nseindia.com{src}")
+        hits = sorted({m.decode(errors="replace")[:120] for m in IDENTIFIERISH.findall(js)})
+        apis = sorted({x.decode()[:80] for x in re.findall(rb"/api/[A-Za-z0-9_\-]+", js)})
+        print(f"\n[script {src[-60:]}] -> {st} {len(js):,} bytes")
+        print(f"  'integrat' references: {hits[:40]}")
+        print(f"  /api/ paths: {apis[:60]}")
+
+
 def main() -> int:
     p = Probe()
+    if "--round" in sys.argv and sys.argv[sys.argv.index("--round") + 1] == "5":
+        print("Phase 2.0 source probe, round 5 - metadata only; nothing stored, no database")
+        round_five(p)
+        print(f"\nSUMMARY requests={p.requests} ok={p.successes} refused={p.refusals}")
+        return 0
     if "--round" in sys.argv and sys.argv[sys.argv.index("--round") + 1] == "4":
         print("Phase 2.0 source probe, round 4 - metadata only; nothing stored, no database")
         round_four(p)
