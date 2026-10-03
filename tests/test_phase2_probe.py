@@ -94,3 +94,9 @@ def test_link_shape_hides_identifiers():
     p = load()
     shape = p.link_shape("https://nsearchives.nseindia.com/corporate/xbrl/INDUSTRIALBANKLIMITED_12345_2016.xml")
     assert "12345" not in shape and "INDUSTRIALBANK" not in shape and shape.endswith(".xml")
+
+
+def test_integrated_path_matches_what_nse_page_builds():
+    path = load().integrated_path(date(2026, 8, 7), date(2026, 8, 14))
+    assert path == ("integrated-filing-results?&from_date=07-08-2026&to_date=14-08-2026"
+                    "&type=Integrated%20Filing-%20Financials&page=1&size=50")

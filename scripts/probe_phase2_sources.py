@@ -421,8 +421,58 @@ def round_seven(p: "Probe") -> None:
             print(f"  [{needle.decode()}] {ctx[width // 2 - 10:]}")
 
 
+INTEGRATED_FINANCIALS = "Integrated%20Filing-%20Financials"  # the page's own integratedFGHash value
+
+
+def integrated_path(start: date, end: date, page: int = 1, size: int = 50) -> str:
+    """Exactly the URL NSE's corporate-filings.js builds (ensureSymbolAndDates
+    + loadIntegratedFillingXBRLData), including its leading '?&'."""
+    return (f"integrated-filing-results?&from_date={nse_date(start)}&to_date={nse_date(end)}"
+            f"&type={INTEGRATED_FINANCIALS}&page={page}&size={size}")
+
+
+def round_eight(p: "Probe") -> None:
+    """Call integrated-filing-results as NSE's page does; check it joins up
+    with the classic endpoint (which ended Feb 2025); inspect one XBRL."""
+    found = {}
+    for start, end in ((date(2026, 8, 7), date(2026, 8, 14)), (date(2025, 5, 15), date(2025, 5, 22)),
+                       (date(2025, 2, 7), date(2025, 2, 14))):
+        status, body, _ = p.get(f"{NSE_API}/{integrated_path(start, end)}")
+        print(f"\n[integrated {start}..{end}] -> {status} {len(body):,} bytes")
+        if status != 200:
+            continue
+        try:
+            payload = json.loads(body)
+        except ValueError:
+            print(f"  not JSON; starts {body[:60]!r}")
+            continue
+        recs = records_of(payload)
+        total = payload.get("totalCount") if isinstance(payload, dict) else None
+        print(f"  totalCount: {total}; records on page: {len(recs)}")
+        if recs:
+            s = field_summary(recs)
+            print(f"  fields: {json.dumps(s['fields'])}")
+            print(f"  timestamp examples: {json.dumps(s['timestamp_examples'])}")
+            print(f"  enumerations: {json.dumps(enumerations(recs))}")
+            shapes = Counter(link_shape(v) for r in recs for v in r.values()
+                             if isinstance(v, str) and v.lower().endswith(".xml"))
+            print(f"  xml link shapes: {json.dumps(dict(shapes.most_common(5)))}")
+            found[start] = recs
+    global SHOW_ELEMENT_NAMES
+    SHOW_ELEMENT_NAMES = True
+    for start in sorted(found, reverse=True)[:1]:
+        links = xml_links(found[start])
+        if links:
+            p.xbrl(f"integrated XBRL from {start} window", links[0])
+
+
 def main() -> int:
     p = Probe()
+    if "--round" in sys.argv and sys.argv[sys.argv.index("--round") + 1] == "8":
+        print("Phase 2.0 source probe, round 8 - metadata only; nothing stored, no database")
+        round_eight(p)
+        print(f"\nSUMMARY requests={p.requests} ok={p.successes} refused={p.refusals}")
+        return 0
     if "--round" in sys.argv and sys.argv[sys.argv.index("--round") + 1] == "7":
         print("Phase 2.0 source probe, round 7 - metadata only; nothing stored, no database")
         round_seven(p)
