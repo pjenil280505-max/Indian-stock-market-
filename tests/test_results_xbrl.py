@@ -239,6 +239,7 @@ def test_classic_ytd_column_stamped_with_quarter_dates_is_trusted_and_flagged():
 
 
 def test_year_to_date_smaller_than_the_quarter_is_rejected():
-    r = parse_results(two_columns(fact("RevenueFromOperations", "Q", "500"), fact("ProfitBeforeTax", "Q", "1"),
-                                  fact("RevenueFromOperations", "Y", "300"), fact("ProfitBeforeTax", "Y", "2")))
+    # Realistic magnitudes: the check allows two lakh of rounding slack.
+    r = parse_results(two_columns(fact("RevenueFromOperations", "Q", "5000000000"), fact("ProfitBeforeTax", "Q", "1"),
+                                  fact("RevenueFromOperations", "Y", "3000000000"), fact("ProfitBeforeTax", "Y", "2")))
     assert "ytd_below_quarter" in [c for c, _ in r.problems]
