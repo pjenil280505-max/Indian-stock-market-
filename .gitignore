@@ -20,3 +20,11 @@ data/
 .pytest_cache/
 .coverage
 .DS_Store
+
+# Phase 2 raw evidence lives in object storage, never in the repository
+# (it is public). See docs/PHASE_2_REPORT.md.
+*.xml
+*.xml.gz
+*.pdf
+*.gz
+evidence/

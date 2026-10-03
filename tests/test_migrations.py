@@ -127,7 +127,7 @@ class TestExistingProductionShape:
 
         done = apply_pending(conn)
 
-        assert [m.version for m in done] == ["0001", "0002"]
+        assert [m.version for m in done] == [m.version for m in discover()]
         assert data_fingerprint(conn) == before
 
     def test_baseline_and_partial_status_are_no_ops_on_current_schema(self, conn):

@@ -1,0 +1,43 @@
+name: Phase 2 evidence update
+
+# Phase 2.1: issuer identity sync + evidence-storage check. Data collection
+# only - no signals, no trading.
+#
+# Scheduled at 00:31 UTC Tue-Sat. GitHub has delivered schedules on this
+# repository 4-6.5 hours late, so it still lands well before 10:30 UTC. The
+# script itself refuses to run between 10:30 and 15:45 UTC on weekdays:
+# it shares the database-writer lock with the daily load, and a newly queued
+# run in the same group cancels an older PENDING one.
+on:
+  schedule:
+    - cron: '31 0 * * 2-6'
+  workflow_dispatch:
+
+concurrency:
+  group: database-writer
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Identity sync and evidence-storage check
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+        run: python3 scripts/phase2_update.py
