@@ -410,8 +410,24 @@ def round_six(p: "Probe") -> None:
         print(f"  link shapes: {json.dumps(dict(links.most_common(5)))}")
 
 
+def round_seven(p: "Probe") -> None:
+    """The definitions that build the integrated-filing-results URL."""
+    st, js, _ = p.get("https://www.nseindia.com/dist/js/sections/corporate-filings.js?v=01102026")
+    print(f"\n[corporate-filings.js] -> {st} {len(js):,} bytes")
+    for needle, width in ((b"function ensureSymbolAndDates", 1400), (b"function loadIntegratedFillingXBRLData", 1600),
+                          (b"function getFilterValues", 1600), (b"integratedFGHash=", 600),
+                          (b"integratedFGHash.set", 600)):
+        for i, ctx in enumerate(code_context(js, needle, width=width, limit=1)):
+            print(f"  [{needle.decode()}] {ctx[width // 2 - 10:]}")
+
+
 def main() -> int:
     p = Probe()
+    if "--round" in sys.argv and sys.argv[sys.argv.index("--round") + 1] == "7":
+        print("Phase 2.0 source probe, round 7 - metadata only; nothing stored, no database")
+        round_seven(p)
+        print(f"\nSUMMARY requests={p.requests} ok={p.successes} refused={p.refusals}")
+        return 0
     if "--round" in sys.argv and sys.argv[sys.argv.index("--round") + 1] == "6":
         print("Phase 2.0 source probe, round 6 - metadata only; nothing stored, no database")
         round_six(p)
