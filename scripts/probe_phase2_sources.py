@@ -333,8 +333,30 @@ def round_three(p: "Probe") -> None:
               f"{path[len('/api/'):]}?index=equities&from_date=07-08-2026&to_date=14-08-2026", enums=True)
 
 
+RESULTISH = re.compile(r"result|integrated|financial", re.I)
+
+
+def round_four(p: "Probe") -> None:
+    """After early 2025, results left the classic endpoint. Do they arrive as
+    announcements, and is the attachment XBRL? Two peak results days."""
+    for d in (date(2026, 8, 13), date(2026, 8, 14)):
+        recs = p.api(f"announcements {d}", f"corporate-announcements?index=equities&from_date={nse_date(d)}&to_date={nse_date(d)}")
+        hits = [r for r in recs if RESULTISH.search(str(r.get("desc", "")))]
+        cats = Counter(str(r.get("desc"))[:60] for r in hits)
+        shapes = Counter(link_shape(r.get("attchmntFile")) for r in hits)
+        exts = Counter(str(r.get("attchmntFile", "")).rsplit(".", 1)[-1].lower()[:6] for r in hits)
+        print(f"  results-like announcements: {len(hits)}; categories: {json.dumps(dict(cats.most_common(8)))}")
+        print(f"  attachment extensions: {json.dumps(dict(exts.most_common(6)))}")
+        print(f"  attachment shapes: {json.dumps(dict(shapes.most_common(5)))}")
+
+
 def main() -> int:
     p = Probe()
+    if "--round" in sys.argv and sys.argv[sys.argv.index("--round") + 1] == "4":
+        print("Phase 2.0 source probe, round 4 - metadata only; nothing stored, no database")
+        round_four(p)
+        print(f"\nSUMMARY requests={p.requests} ok={p.successes} refused={p.refusals}")
+        return 0
     if "--round" in sys.argv and sys.argv[sys.argv.index("--round") + 1] == "3":
         print("Phase 2.0 source probe, round 3 - metadata only; nothing stored, no database")
         round_three(p)
