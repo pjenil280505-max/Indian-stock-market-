@@ -58,12 +58,13 @@ def test_reads_current_period_only_and_ignores_comparatives_and_segments():
                           fact("RevenueFromOperations", "SEG", "1"), fact("Assets", "I", "5000000000")))
     assert r.accepted, r.problems
     assert r.facts["revenue"].value == Decimal("1000000000")
-    assert r.facts["revenue"].context_kind == "period" and r.facts["revenue"].start == date(2026, 4, 1)
-    assert r.facts["total_assets"].context_kind == "instant_end"
+    assert r.facts["revenue"].start == date(2026, 4, 1) and r.facts["revenue"].end == date(2026, 6, 30)
+    assert r.facts["total_assets"].start is None and r.facts["total_assets"].end == date(2026, 6, 30)
     assert r.facts["eps_basic"].unit == "INRPerShare" and r.facts["eps_basic"].value == Decimal("2.5")
     assert (r.basis, r.audited, r.period_type, r.isin, r.taxonomy) == (
         "standalone", False, "Q", "INE002A01018", "in-capmkt")
-    assert r.context_counts == {"period": 1, "other": 1, "instant_end": 1, "dimensional": 1}
+    assert r.context_counts == {"column": 1, "other": 1, "instant": 1, "dimensional": 1}
+    assert len(r.columns) == 1
     assert r.warnings == []
 
 
@@ -72,17 +73,58 @@ def test_missing_fact_stays_missing_never_zero():
     assert "total_assets" not in r.facts and "cfo" not in r.facts
 
 
-def test_cash_flow_comes_from_the_year_to_date_context():
-    contexts = [ctx("Q", "2026-07-01", "2026-09-30"), ctx("YTD", "2026-04-01", "2026-09-30")]
-    body = doc(fact("ProfitBeforeTax", "Q", "1"), fact("ProfitLossForPeriod", "Q", "1"),
-               fact("CashFlowsFromUsedInOperatingActivities", "YTD", "777"), contexts=contexts)
-    body = body.replace(b"2026-04-01</in-capmkt:DateOfStartOfReportingPeriod",
-                        b"2026-07-01</in-capmkt:DateOfStartOfReportingPeriod").replace(
-                        b"2026-06-30</in-capmkt:DateOfEndOfReportingPeriod",
-                        b"2026-09-30</in-capmkt:DateOfEndOfReportingPeriod")
+def column_meta(cid, start, end, audited="Unaudited"):
+    return "".join(fact(n, cid, v, unit=None) for n, v in (
+        ("DateOfStartOfReportingPeriod", start), ("DateOfEndOfReportingPeriod", end),
+        ("WhetherResultsAreAuditedOrUnaudited", audited)))
+
+
+def two_columns(*parts, q=("2026-01-01", "2026-03-31"), y=("2025-04-01", "2026-03-31"), y_audited="Audited"):
+    contexts = [ctx("Q", *q), ctx("Y", *y), ctx("I", instant=q[1])]
+    head = "".join(contexts) + UNITS + fact("NatureOfReportStandaloneConsolidated", "Q", "Consolidated", unit=None)
+    body = column_meta("Q", *q) + column_meta("Y", *y, audited=y_audited) + "".join(parts)
+    return f'<xbrli:xbrl {NS}>{head}{body}</xbrli:xbrl>'.encode()
+
+
+def test_a_q4_filing_yields_the_quarter_and_the_full_year():
+    r = parse_results(two_columns(
+        fact("ProfitBeforeTax", "Q", "100"), fact("ProfitLossForPeriod", "Q", "75"), fact("TaxExpense", "Q", "25"),
+        fact("ProfitBeforeTax", "Y", "400"), fact("ProfitLossForPeriod", "Y", "300"), fact("TaxExpense", "Y", "100"),
+        fact("CashFlowsFromUsedInOperatingActivities", "Y", "350"), fact("Assets", "I", "9000")))
+    assert r.accepted, r.problems
+    q, y = r.columns
+    assert (q.period_type, y.period_type) == ("Q", "FY") and r.primary is q
+    assert (q.audited, y.audited) == (False, True)
+    assert q.facts["pat"].value == 75 and y.facts["pat"].value == 300
+    assert "cfo" not in q.facts and y.facts["cfo"].value == 350     # cash flow is reported for the year
+    assert q.facts["total_assets"].value == y.facts["total_assets"].value == 9000
+    assert r.basis == "consolidated"
+
+
+def test_a_column_whose_context_contradicts_its_stated_period_is_rejected():
+    body = two_columns(fact("ProfitBeforeTax", "Q", "1")).replace(
+        b"2026-01-01</in-capmkt:DateOfStartOfReportingPeriod", b"2026-02-01</in-capmkt:DateOfStartOfReportingPeriod")
+    assert "period_mismatch" in [c for c, _ in parse_results(body).problems]
+
+
+def test_contexts_nested_below_the_root_are_found():
+    body = doc(*PNL).replace(b'<xbrli:context id="Q">', b'<wrap><xbrli:context id="Q">', 1).replace(
+        b"</xbrli:context>", b"</xbrli:context></wrap>", 1)
     r = parse_results(body)
     assert r.accepted, r.problems
-    assert r.facts["cfo"].value == 777 and r.facts["cfo"].context_kind == "ytd"
+    assert r.facts["pat"].value == 150000000
+
+
+def test_a_unitless_candidate_is_skipped_with_a_warning_not_a_rejection():
+    r = parse_results(doc(*PNL, '<in-capmkt:Assets contextRef="I">label</in-capmkt:Assets>'))
+    assert r.accepted, r.problems
+    assert "total_assets" not in r.facts and ("unitless_fact", "Assets") in r.warnings
+
+
+def test_secondary_column_without_profit_is_a_warning_only():
+    r = parse_results(two_columns(fact("ProfitBeforeTax", "Q", "100"), fact("ProfitLossForPeriod", "Q", "75")))
+    assert r.accepted, r.problems
+    assert [c for c, _ in r.warnings] == ["column_without_core"]
 
 
 def test_banking_template_uses_bank_element_names():
@@ -169,3 +211,11 @@ def test_period_type(start, end, kind):
 ])
 def test_template_from_name(name, template):
     assert template_from_name(name) == template
+
+
+def test_segment_balance_sheet_figures_are_never_read_as_company_totals():
+    contexts = [ctx("Q", "2026-04-01", "2026-06-30"), ctx("I", instant="2026-06-30"),
+                ctx("ISEG", instant="2026-06-30", dim=True)]
+    r = parse_results(doc(*PNL, fact("Assets", "I", "5000"), fact("Assets", "ISEG", "1200"), contexts=contexts))
+    assert r.accepted, r.problems
+    assert r.facts["total_assets"].value == 5000

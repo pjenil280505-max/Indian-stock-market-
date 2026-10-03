@@ -499,15 +499,15 @@ def round_nine(p: "Probe") -> None:
             continue
         r = parse_results(body, name_hint=url)
         expected = set(MAPPINGS[r.template or "general"])
-        got = set(r.facts)
-        found_fields.update(got)
         verdicts["accepted" if r.accepted else "rejected"] += 1
-        print(f"\n[{label}] {r.template} {r.taxonomy} {r.basis} {r.period_start}..{r.period_end} ({r.period_type})"
-              f" audited={r.audited} isin={'yes' if r.isin else 'no'}")
-        print(f"  contexts: {r.context_counts}")
+        print(f"\n[{label}] {r.template} {r.taxonomy} {r.basis} isin={'yes' if r.isin else 'no'}"
+              f" contexts={r.context_counts}")
         print(f"  ACCEPTED={r.accepted} problems={r.problems} warnings={r.warnings}")
-        print(f"  found {len(got)}/{len(expected)}: {sorted(got)}")
-        print(f"  missing: {sorted(expected - got)}")
+        for col in r.columns:
+            got = set(col.facts)
+            found_fields.update(got)
+            print(f"  column {col.start}..{col.end} ({col.period_type}) audited={col.audited}"
+                  f" found {len(got)}/{len(expected)}; missing {sorted(expected - got)}")
     print(f"\nVERDICTS {dict(verdicts)}; field coverage across files: {dict(found_fields.most_common())}")
 
 
