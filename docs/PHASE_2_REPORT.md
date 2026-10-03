@@ -71,3 +71,50 @@ Every call used the honest User-Agent; nothing was evaded.
 - **D4:** Decide whether to generate the Upstox Analytics Token (for news collection).
 
 Probe code: `scripts/probe_phase2_sources.py` and `.github/workflows/phase2-source-probe.yml`. The workflow runs only on a push to this branch that changes the probe. Tests: `tests/test_phase2_probe.py`.
+
+---
+
+## 2.1 Issuer identity + evidence store — built, NOT deployed (commit `405263c`)
+
+- Migration `0003` adds four tables and changes no existing table; tests prove Phase 1 data and
+  columns are identical before and after. `issuers` / `symbol_issuer` key companies on the ISIN
+  issuer code (partly-paid/DVR map to the same company; funds and invalid ISINs are flagged,
+  never guessed). `symbol_aliases` records ticker history from first observation onward.
+  `source_documents` registers raw evidence; a trigger refuses UPDATE of evidence columns and DELETE.
+- R2 client: stdlib SigV4 signer verified against AWS's published example; pinned to the
+  account endpoint; HEAD/GET/conditional PUT only.
+- `scripts/phase2_update.py` + `phase2-update.yml`: identity sync + storage canary; refuses to
+  run 10:30–15:45 UTC on weekdays; scheduled 00:31 UTC Tue–Sat.
+- 44 new tests, 9 mutations all caught. One existing assertion generalised (the hard-coded
+  migration list in `test_migrations.py`).
+- **Blocked on you:** R2 is not enabled on the Cloudflare account (API: "Please enable R2
+  through the Cloudflare Dashboard").
+
+**Deploy order (when approved) — order matters:** Phase 1's daily job stops if a migration is
+pending, so 0003 must be applied *before* the code reaches `main`'s schedule:
+1. Enable R2, create bucket `isr-evidence`, create an R2 API token scoped to that bucket
+   (Object Read & Write), add secrets `R2_ENDPOINT`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`.
+2. Run *Database migrations* `status`, then `apply` from this branch (0003 only; fingerprint
+   guard checks Phase 1 data).
+3. Merge to `main`; dispatch *Phase 2 evidence update* once; verify identity counts and
+   `storage OK (written, verified)`.
+Rollback: the code is additive; reverting the merge stops the job. The four tables can stay.
+
+## Recent-results source — FOUND (runs 37097971685, 37098067076, 37098157958, 37098246667)
+
+Method: read NSE's own page code (`/dist/js/sections/corporate-filings.js`) for the endpoint and
+the exact URL it builds; no endpoint name or parameter was guessed.
+
+| Item | Measured |
+|---|---|
+| Endpoint | `/api/integrated-filing-results?&from_date=DD-MM-YYYY&to_date=DD-MM-YYYY&type=Integrated Filing- Financials&page=N&size=M` → `{data, totalCount}` |
+| Coverage | Aug 2026 week **2,221**; May 2025 week **921** (quarter ending 31-Mar-2025); Feb 2025 **0** — it begins exactly where the classic endpoint ends |
+| Fields | `seq_Id`, `symbol`, `smName`, `qe_Date`, `consolidated` (Standalone/Consolidated), `audited`, `broadcast_Date` (44/50 filled), `creation_Date`, **`type_Sub` (Original/Revision)**, `revised_Date`, `revision_Remark`, `xbrl`, `ixbrl`. **No ISIN in the JSON** |
+| XBRL | `INTEGRATED_FILING_{INDAS,NONINDAS,NBFC_INDAS}_*_WEB.xml`; taxonomy **`in-capmkt`** (new), same core element names as before; **ISIN present**; unit INR; `decimals` varies (−3/−4/−5) |
+| RSS | `nsearchives…/content/RSS/Integrated_Filing_Financials.xml` — latest 20 only (insufficient alone) |
+
+So structured, point-in-time results exist **from 2018 (partial) / 2020 (full) to today**, across
+two endpoints that meet at the quarter ending Mar 2025. Knowledge time: `broadcast_Date`, else
+`creation_Date` (quality flagged). Also seen in NSE's code, not yet probed:
+`/api/corporate-pledgedata` (could fill the pledge-% gap), `/api/annual-reports-xbrl`,
+`/api/corporate-credit-rating`, `/api/corporate-board-meetings`.
