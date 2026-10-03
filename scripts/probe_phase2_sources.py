@@ -374,8 +374,49 @@ def round_five(p: "Probe") -> None:
         print(f"  /api/ paths: {apis[:60]}")
 
 
+def code_context(js: bytes, needle: bytes, width: int = 500, limit: int = 3) -> list[str]:
+    """The page's own code around a reference (public JavaScript, not data)."""
+    out, start = [], 0
+    while len(out) < limit:
+        i = js.find(needle, start)
+        if i < 0:
+            break
+        out.append(re.sub(r"\s+", " ", js[max(0, i - width // 2): i + width].decode(errors="replace")))
+        start = i + len(needle)
+    return out
+
+
+def round_six(p: "Probe") -> None:
+    """How does NSE's own page call integrated-filing-results, and what does
+    its integrated-filing RSS feed contain?"""
+    st, js, _ = p.get("https://www.nseindia.com/dist/js/sections/corporate-filings.js?v=01102026")
+    print(f"\n[corporate-filings.js] -> {st} {len(js):,} bytes")
+    for needle in (b"integrated-filing-results", b"loadIntegratedFillingXBRLData"):
+        for i, ctx in enumerate(code_context(js, needle)):
+            print(f"  [{needle.decode()} #{i + 1}] {ctx}")
+    st, rss, headers = p.get("https://nsearchives.nseindia.com/content/RSS/Integrated_Filing_Financials.xml")
+    print(f"\n[RSS Integrated_Filing_Financials.xml] -> {st} {len(rss):,} bytes"
+          f" last-modified: {headers.get('last-modified', 'not sent')}")
+    if st == 200 and not re.search(rb"<!DOCTYPE|<!ENTITY", rss, re.I):
+        import xml.etree.ElementTree as ET
+
+        items = ET.fromstring(rss).iter("item")
+        items = list(items)
+        tags = Counter(child.tag for it in items for child in it)
+        dates = sorted(it.findtext("pubDate", "")[:31] for it in items)
+        links = Counter(link_shape(it.findtext("link", "")) for it in items)
+        print(f"  items: {len(items)}; fields: {dict(tags)}")
+        print(f"  pubDate range: {dates[:1]} .. {dates[-1:]}")
+        print(f"  link shapes: {json.dumps(dict(links.most_common(5)))}")
+
+
 def main() -> int:
     p = Probe()
+    if "--round" in sys.argv and sys.argv[sys.argv.index("--round") + 1] == "6":
+        print("Phase 2.0 source probe, round 6 - metadata only; nothing stored, no database")
+        round_six(p)
+        print(f"\nSUMMARY requests={p.requests} ok={p.successes} refused={p.refusals}")
+        return 0
     if "--round" in sys.argv and sys.argv[sys.argv.index("--round") + 1] == "5":
         print("Phase 2.0 source probe, round 5 - metadata only; nothing stored, no database")
         round_five(p)
